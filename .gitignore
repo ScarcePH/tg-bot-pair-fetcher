@@ -1,0 +1,10 @@
+bot_state.sqlite3
+bot_state.sqlite3-*
+data/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+/venv/
+/tests/
+.DS_Store
