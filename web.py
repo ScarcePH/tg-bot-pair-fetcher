@@ -44,6 +44,9 @@ def create_app(
             await telegram_application.stop()
             await telegram_application.shutdown()
 
+    async def root(_request: Request) -> JSONResponse:
+        return JSONResponse({'status': 'running'})
+
     async def healthz(_request: Request) -> JSONResponse:
         return JSONResponse({'status': 'ok'})
 
@@ -68,6 +71,7 @@ def create_app(
 
     return Starlette(
         routes=[
+            Route('/', root, methods=['GET']),
             Route('/healthz', healthz, methods=['GET']),
             Route('/telegram/webhook', telegram_webhook, methods=['POST']),
             Route('/tasks/fetch', scheduled_fetch, methods=['POST']),
