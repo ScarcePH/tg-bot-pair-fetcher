@@ -5,7 +5,6 @@ import inspect
 import logging
 import os
 import re
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from urllib.parse import quote_plus, urldefrag, urljoin, urlparse
@@ -204,7 +203,6 @@ def extract_marketplace_links_from_page(
 async def scrape_search_page(
     marketplace: Marketplace,
     query: str,
-    stealth_session: AsyncStealthySession | None = None,
 ) -> list[str]:
     search_url = marketplace.search_url(query)
     logger.info('Scraping %s for "%s": %s', marketplace.key, query, search_url)
@@ -212,16 +210,19 @@ async def scrape_search_page(
 
     try:
         if marketplace.fetch_mode == FETCH_MODE_STEALTH:
-            if stealth_session is None:
-                raise RuntimeError(f'{marketplace.key} requires a stealth Scrapling session')
+            async with build_stealth_session() as stealth_session:
+                fetch_options = build_stealth_fetch_options(marketplace.fetch_wait_ms)
+                accept_language = os.getenv('SCRAPER_ACCEPT_LANGUAGE', '').strip()
 
-            fetch_options = build_stealth_fetch_options(marketplace.fetch_wait_ms)
-            accept_language = os.getenv('SCRAPER_ACCEPT_LANGUAGE', '').strip()
+                if accept_language:
+                    fetch_options['extra_headers'] = {'Accept-Language': accept_language}
 
-            if accept_language:
-                fetch_options['extra_headers'] = {'Accept-Language': accept_language}
+                page = await stealth_session.fetch(search_url, **fetch_options)
 
-            page = await stealth_session.fetch(search_url, **fetch_options)
+                if page.status >= 400:
+                    raise RuntimeError(f'{search_url} returned HTTP {page.status}')
+
+                return extract_marketplace_links_from_page(page, search_url, marketplace)
         else:
             page = await AsyncFetcher.get(
                 search_url,
@@ -231,12 +232,22 @@ async def scrape_search_page(
                 timeout=30,
             )
 
-        if page.status >= 400:
-            raise RuntimeError(f'{search_url} returned HTTP {page.status}')
+            if page.status >= 400:
+                raise RuntimeError(f'{search_url} returned HTTP {page.status}')
 
-        return extract_marketplace_links_from_page(page, search_url, marketplace)
+            return extract_marketplace_links_from_page(page, search_url, marketplace)
     finally:
         await close_scrape_resources(page)
+
+
+def build_stealth_session() -> AsyncStealthySession:
+    return AsyncStealthySession(
+        block_webrtc=True,
+        headless=True,
+        locale=os.getenv('SCRAPER_STEALTH_LOCALE', 'en-US').strip() or 'en-US',
+        max_pages=1,
+        timezone_id=os.getenv('SCRAPER_STEALTH_TIMEZONE', 'UTC').strip() or 'UTC',
+    )
 
 
 def build_stealth_fetch_options(fetch_wait_ms: int) -> dict[str, object]:
@@ -294,39 +305,24 @@ async def scrape_link_results(
     scrape_delay_ms = get_scrape_delay_ms()
 
     found_links: list[ScrapedLink] = []
-    needs_stealth_session = any(marketplace.fetch_mode == FETCH_MODE_STEALTH for marketplace in marketplaces)
     total_attempts = len(marketplaces) * len(item_queries)
     completed_attempts = 0
 
-    async with AsyncExitStack() as stack:
-        stealth_session = None
-
-        if needs_stealth_session:
-            stealth_session = await stack.enter_async_context(
-                AsyncStealthySession(
-                    block_webrtc=True,
-                    headless=True,
-                    locale=os.getenv('SCRAPER_STEALTH_LOCALE', 'en-US').strip() or 'en-US',
-                    max_pages=1,
-                    timezone_id=os.getenv('SCRAPER_STEALTH_TIMEZONE', 'UTC').strip() or 'UTC',
+    for marketplace in marketplaces:
+        for query in item_queries:
+            try:
+                links = await scrape_search_page(marketplace, query)
+                found_links.extend(
+                    ScrapedLink(url=link, marketplace_key=marketplace.key, query=query)
+                    for link in links
                 )
-            )
+            except Exception:
+                logger.exception('Failed to scrape %s for "%s"', marketplace.key, query)
+            finally:
+                completed_attempts += 1
 
-        for marketplace in marketplaces:
-            for query in item_queries:
-                try:
-                    links = await scrape_search_page(marketplace, query, stealth_session)
-                    found_links.extend(
-                        ScrapedLink(url=link, marketplace_key=marketplace.key, query=query)
-                        for link in links
-                    )
-                except Exception:
-                    logger.exception('Failed to scrape %s for "%s"', marketplace.key, query)
-                finally:
-                    completed_attempts += 1
-
-                    if completed_attempts < total_attempts and scrape_delay_ms:
-                        await asyncio.sleep(scrape_delay_ms / 1000)
+                if completed_attempts < total_attempts and scrape_delay_ms:
+                    await asyncio.sleep(scrape_delay_ms / 1000)
 
     return found_links
 
