@@ -27,7 +27,7 @@ Marketplace configuration stays in environment variables. `MARKETPLACES` is comm
 
 - Required: `BASE_URL`, `SEARCH_URL_TEMPLATE` (containing `{query}`), `ITEM_HOSTS`, and `ITEM_PATH_MARKERS`.
 - Optional: `FETCH_MODE` (`standard` or `stealth`) and non-negative `FETCH_WAIT_MS`.
-- Optional browser settings: `SCRAPER_ACCEPT_LANGUAGE`, `SCRAPER_STEALTH_LOCALE`, and `SCRAPER_STEALTH_TIMEZONE`.
+- Optional browser settings: `SCRAPER_ACCEPT_LANGUAGE`, `SCRAPER_SCRAPE_DELAY_MS` (global delay between scrape attempts, default `2000`), `SCRAPER_STEALTH_LOCALE`, and `SCRAPER_STEALTH_TIMEZONE`.
 
 See [.env.example](.env.example) for a complete example.
 
