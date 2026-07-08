@@ -50,6 +50,14 @@ FETCH_MODE_STANDARD = 'standard'
 FETCH_MODE_STEALTH = 'stealth'
 FETCH_MODES = {FETCH_MODE_STANDARD, FETCH_MODE_STEALTH}
 DEFAULT_SCRAPE_DELAY_MS = 2000
+STEALTH_FETCH_ATTEMPTS = 3
+STEALTH_RETRY_DELAY_SECONDS = 0.5
+STEALTH_CHROMIUM_FLAGS = (
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-setuid-sandbox',
+    '--no-sandbox',
+)
 
 
 def parse_csv_env(name: str) -> list[str]:
@@ -206,31 +214,58 @@ async def scrape_search_page(
 ) -> list[str]:
     search_url = marketplace.search_url(query)
     logger.info('Scraping %s for "%s": %s', marketplace.key, query, search_url)
+
+    if marketplace.fetch_mode == FETCH_MODE_STEALTH:
+        return await scrape_search_page_with_stealth_fallback(marketplace, search_url)
+
+    return await scrape_search_page_standard(marketplace, search_url)
+
+
+async def scrape_search_page_with_stealth_fallback(
+    marketplace: Marketplace,
+    search_url: str,
+) -> list[str]:
+    last_error: Exception | None = None
+
+    for attempt in range(1, STEALTH_FETCH_ATTEMPTS + 1):
+        try:
+            return await scrape_search_page_stealth_once(marketplace, search_url)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                'Stealth scrape attempt %s/%s failed for %s: %s',
+                attempt,
+                STEALTH_FETCH_ATTEMPTS,
+                marketplace.key,
+                exc,
+            )
+
+            if attempt < STEALTH_FETCH_ATTEMPTS:
+                await asyncio.sleep(STEALTH_RETRY_DELAY_SECONDS)
+
+    logger.warning(
+        'Falling back to standard fetch for %s after stealth failures: %s',
+        marketplace.key,
+        last_error,
+    )
+    return await scrape_search_page_standard(marketplace, search_url)
+
+
+async def scrape_search_page_stealth_once(
+    marketplace: Marketplace,
+    search_url: str,
+) -> list[str]:
     page = None
 
     try:
-        if marketplace.fetch_mode == FETCH_MODE_STEALTH:
-            async with build_stealth_session() as stealth_session:
-                fetch_options = build_stealth_fetch_options(marketplace.fetch_wait_ms)
-                accept_language = os.getenv('SCRAPER_ACCEPT_LANGUAGE', '').strip()
+        async with build_stealth_session() as stealth_session:
+            fetch_options = build_stealth_fetch_options(marketplace.fetch_wait_ms)
+            accept_language = os.getenv('SCRAPER_ACCEPT_LANGUAGE', '').strip()
 
-                if accept_language:
-                    fetch_options['extra_headers'] = {'Accept-Language': accept_language}
+            if accept_language:
+                fetch_options['extra_headers'] = {'Accept-Language': accept_language}
 
-                page = await stealth_session.fetch(search_url, **fetch_options)
-
-                if page.status >= 400:
-                    raise RuntimeError(f'{search_url} returned HTTP {page.status}')
-
-                return extract_marketplace_links_from_page(page, search_url, marketplace)
-        else:
-            page = await AsyncFetcher.get(
-                search_url,
-                follow_redirects=True,
-                impersonate='chrome',
-                stealthy_headers=True,
-                timeout=30,
-            )
+            page = await stealth_session.fetch(search_url, **fetch_options)
 
             if page.status >= 400:
                 raise RuntimeError(f'{search_url} returned HTTP {page.status}')
@@ -240,14 +275,42 @@ async def scrape_search_page(
         await close_scrape_resources(page)
 
 
+async def scrape_search_page_standard(
+    marketplace: Marketplace,
+    search_url: str,
+) -> list[str]:
+    page = None
+
+    try:
+        page = await AsyncFetcher.get(
+            search_url,
+            follow_redirects=True,
+            impersonate='chrome',
+            stealthy_headers=True,
+            timeout=30,
+        )
+
+        if page.status >= 400:
+            raise RuntimeError(f'{search_url} returned HTTP {page.status}')
+
+        return extract_marketplace_links_from_page(page, search_url, marketplace)
+    finally:
+        await close_scrape_resources(page)
+
+
 def build_stealth_session() -> AsyncStealthySession:
-    return AsyncStealthySession(
-        block_webrtc=True,
-        headless=True,
-        locale=os.getenv('SCRAPER_STEALTH_LOCALE', 'en-US').strip() or 'en-US',
-        max_pages=1,
-        timezone_id=os.getenv('SCRAPER_STEALTH_TIMEZONE', 'UTC').strip() or 'UTC',
-    )
+    session_options = {
+        'block_webrtc': True,
+        'headless': True,
+        'locale': os.getenv('SCRAPER_STEALTH_LOCALE', 'en-US').strip() or 'en-US',
+        'max_pages': 1,
+        'timezone_id': os.getenv('SCRAPER_STEALTH_TIMEZONE', 'UTC').strip() or 'UTC',
+    }
+
+    if supports_keyword_parameter(AsyncStealthySession, 'extra_flags'):
+        session_options['extra_flags'] = list(STEALTH_CHROMIUM_FLAGS)
+
+    return AsyncStealthySession(**session_options)
 
 
 def build_stealth_fetch_options(fetch_wait_ms: int) -> dict[str, object]:
@@ -255,7 +318,22 @@ def build_stealth_fetch_options(fetch_wait_ms: int) -> dict[str, object]:
         'timeout': 60000,
         'wait': fetch_wait_ms,
         'load_dom': True,
+        'disable_resources': True,
     }
+
+
+def supports_keyword_parameter(callable_object: object, name: str) -> bool:
+    try:
+        signature = inspect.signature(callable_object)
+    except (TypeError, ValueError):
+        return False
+
+    parameters = signature.parameters.values()
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or parameter.name == name
+        for parameter in parameters
+    )
 
 
 async def close_scrape_resources(page: object | None) -> None:
