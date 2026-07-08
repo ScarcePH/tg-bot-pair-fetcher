@@ -8,4 +8,4 @@ RUN scrapling install
 
 COPY . .
 
-CMD ["python", "bot.py"]
+CMD ["sh", "-c", "uvicorn web:create_app --factory --host 0.0.0.0 --port ${PORT:-8080}"]

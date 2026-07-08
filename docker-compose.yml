@@ -3,6 +3,5 @@ services:
     build: .
     env_file:
       - .env
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
+    ports:
+      - "8080:8080"
