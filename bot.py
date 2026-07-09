@@ -6,7 +6,6 @@ from typing import Any
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -219,9 +218,18 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     chat_id = str(update.effective_chat.id)
+    await context.bot.send_message(chat_id=chat_id, text='Fetch started.')
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    await run_fetch(context, chat_id, manual=True)
+    fetch_coroutine = run_fetch(context.application, chat_id, manual=True)
+    try:
+        context.application.create_task(fetch_coroutine)
+    except Exception:
+        fetch_coroutine.close()
+        logger.exception('Could not schedule fetch task')
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text='Could not start fetch. Check bot logs.',
+        )
 
 
 async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

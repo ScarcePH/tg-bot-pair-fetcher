@@ -5,6 +5,7 @@ import inspect
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from urllib.parse import quote_plus, urldefrag, urljoin, urlparse
@@ -216,27 +217,30 @@ async def scrape_search_page(
     logger.info('Scraping %s for "%s": %s', marketplace.key, query, search_url)
 
     if marketplace.fetch_mode == FETCH_MODE_STEALTH:
-        return await scrape_search_page_with_stealth_fallback(marketplace, search_url)
+        return await scrape_search_page_with_stealth_fallback(marketplace, query, search_url)
 
-    return await scrape_search_page_standard(marketplace, search_url)
+    return await scrape_search_page_standard(marketplace, query, search_url)
 
 
 async def scrape_search_page_with_stealth_fallback(
     marketplace: Marketplace,
+    query: str,
     search_url: str,
 ) -> list[str]:
     last_error: Exception | None = None
 
     for attempt in range(1, STEALTH_FETCH_ATTEMPTS + 1):
         try:
-            return await scrape_search_page_stealth_once(marketplace, search_url)
+            return await scrape_search_page_stealth_once(marketplace, query, search_url, attempt)
         except Exception as exc:
             last_error = exc
             logger.warning(
-                'Stealth scrape attempt %s/%s failed for %s: %s',
+                'Stealth scrape attempt %s/%s failed for %s query=%s search_url=%s: %s',
                 attempt,
                 STEALTH_FETCH_ATTEMPTS,
                 marketplace.key,
+                query,
+                search_url,
                 exc,
             )
 
@@ -244,18 +248,33 @@ async def scrape_search_page_with_stealth_fallback(
                 await asyncio.sleep(STEALTH_RETRY_DELAY_SECONDS)
 
     logger.warning(
-        'Falling back to standard fetch for %s after stealth failures: %s',
+        'Falling back to standard fetch for %s query=%s search_url=%s after stealth failures: %s',
         marketplace.key,
+        query,
+        search_url,
         last_error,
     )
-    return await scrape_search_page_standard(marketplace, search_url)
+    return await scrape_search_page_standard(marketplace, query, search_url)
 
 
 async def scrape_search_page_stealth_once(
     marketplace: Marketplace,
+    query: str,
     search_url: str,
+    attempt: int,
 ) -> list[str]:
     page = None
+    start = time.perf_counter()
+    log_scrape_timing(
+        logging.INFO,
+        'Scrape fetch started',
+        FETCH_MODE_STEALTH,
+        marketplace,
+        query,
+        search_url,
+        attempt=attempt,
+        elapsed_ms=0.0,
+    )
 
     try:
         async with build_stealth_session() as stealth_session:
@@ -270,16 +289,52 @@ async def scrape_search_page_stealth_once(
             if page.status >= 400:
                 raise RuntimeError(f'{search_url} returned HTTP {page.status}')
 
-            return extract_marketplace_links_from_page(page, search_url, marketplace)
+            links = extract_marketplace_links_from_page(page, search_url, marketplace)
+            log_scrape_timing(
+                logging.INFO,
+                'Scrape fetch completed',
+                FETCH_MODE_STEALTH,
+                marketplace,
+                query,
+                search_url,
+                attempt=attempt,
+                elapsed_ms=elapsed_ms_since(start),
+                link_count=len(links),
+            )
+            return links
+    except Exception:
+        log_scrape_timing(
+            logging.WARNING,
+            'Scrape fetch failed',
+            FETCH_MODE_STEALTH,
+            marketplace,
+            query,
+            search_url,
+            attempt=attempt,
+            elapsed_ms=elapsed_ms_since(start),
+            exc_info=True,
+        )
+        raise
     finally:
         await close_scrape_resources(page)
 
 
 async def scrape_search_page_standard(
     marketplace: Marketplace,
+    query: str,
     search_url: str,
 ) -> list[str]:
     page = None
+    start = time.perf_counter()
+    log_scrape_timing(
+        logging.INFO,
+        'Scrape fetch started',
+        FETCH_MODE_STANDARD,
+        marketplace,
+        query,
+        search_url,
+        elapsed_ms=0.0,
+    )
 
     try:
         page = await AsyncFetcher.get(
@@ -293,9 +348,75 @@ async def scrape_search_page_standard(
         if page.status >= 400:
             raise RuntimeError(f'{search_url} returned HTTP {page.status}')
 
-        return extract_marketplace_links_from_page(page, search_url, marketplace)
+        links = extract_marketplace_links_from_page(page, search_url, marketplace)
+        log_scrape_timing(
+            logging.INFO,
+            'Scrape fetch completed',
+            FETCH_MODE_STANDARD,
+            marketplace,
+            query,
+            search_url,
+            elapsed_ms=elapsed_ms_since(start),
+            link_count=len(links),
+        )
+        return links
+    except Exception:
+        log_scrape_timing(
+            logging.WARNING,
+            'Scrape fetch failed',
+            FETCH_MODE_STANDARD,
+            marketplace,
+            query,
+            search_url,
+            elapsed_ms=elapsed_ms_since(start),
+            exc_info=True,
+        )
+        raise
     finally:
         await close_scrape_resources(page)
+
+
+def elapsed_ms_since(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 3)
+
+
+def log_scrape_timing(
+    level: int,
+    message: str,
+    mode: str,
+    marketplace: Marketplace,
+    query: str,
+    search_url: str,
+    *,
+    elapsed_ms: float,
+    attempt: int | None = None,
+    link_count: int | None = None,
+    exc_info: bool = False,
+) -> None:
+    extra: dict[str, object] = {
+        'mode': mode,
+        'marketplace_key': marketplace.key,
+        'query': query,
+        'search_url': search_url,
+        'elapsed_ms': elapsed_ms,
+    }
+    details = [
+        f'mode={mode}',
+        f'marketplace_key={marketplace.key}',
+        f'query={query}',
+        f'search_url={search_url}',
+        f'elapsed_ms={elapsed_ms}',
+    ]
+
+    if attempt is not None:
+        extra['attempt'] = attempt
+        details.append(f'attempt={attempt}')
+
+    if link_count is not None:
+        extra['link_count'] = link_count
+        details.append(f'link_count={link_count}')
+
+    logger.log(level, '%s %s', message, ' '.join(details), extra=extra, exc_info=exc_info)
 
 
 def build_stealth_session() -> AsyncStealthySession:
