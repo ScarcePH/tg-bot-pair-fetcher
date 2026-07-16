@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from typing import Any
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -24,8 +21,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-fetch_lock = asyncio.Lock()
-
 
 def require_env(name: str) -> str:
     value = os.getenv(name, '').strip()
@@ -34,20 +29,6 @@ def require_env(name: str) -> str:
         raise ValueError(f'{name} is required')
 
     return value
-
-
-def get_interval_hours() -> int:
-    raw_value = os.getenv('SCRAPE_INTERVAL_HOURS', '8').strip()
-
-    try:
-        interval = int(raw_value)
-    except ValueError as exc:
-        raise ValueError('SCRAPE_INTERVAL_HOURS must be an integer') from exc
-
-    if interval < 1:
-        raise ValueError('SCRAPE_INTERVAL_HOURS must be at least 1')
-
-    return interval
 
 
 def split_links_for_telegram(links: list[str]) -> list[str]:
@@ -109,16 +90,16 @@ async def run_fetch(
     context: Any,
     chat_id: str,
     manual: bool = False,
-) -> None:
-    if fetch_lock.locked():
-        if manual:
-            await context.bot.send_message(chat_id=chat_id, text='A fetch is already running.')
-        logger.info('Skipped fetch because another fetch is already running')
-        return
+) -> bool:
+    state_store: BotStateStore = get_bot_data(context)['state_store']
+    with state_store.fetch_lock() as lock_acquired:
+        if not lock_acquired:
+            if manual:
+                await context.bot.send_message(chat_id=chat_id, text='A fetch is already running.')
+            logger.info('Skipped fetch because another fetch is already running')
+            return False
 
-    async with fetch_lock:
         try:
-            state_store: BotStateStore = get_bot_data(context)['state_store']
             saved_searches = state_store.list_saved_searches()
 
             if not saved_searches:
@@ -127,7 +108,7 @@ async def run_fetch(
                         chat_id=chat_id,
                         text='No saved SKUs. Use /set <sku> <name> first.',
                     )
-                return
+                return True
 
             scraped_links = await scrape_link_results(
                 item_queries=[search.sku for search in saved_searches],
@@ -156,26 +137,8 @@ async def run_fetch(
             logger.exception('Fetch failed')
             if manual:
                 await context.bot.send_message(chat_id=chat_id, text='Fetch failed. Check bot logs.')
-            return
-
-
-async def scheduled_fetch(application: Application, chat_id: str) -> None:
-    await run_fetch(application, chat_id, manual=False)
-
-
-async def start_scheduler(application: Application) -> None:
-    scheduler = application.bot_data['scheduler']
-    scheduler.start()
-    logger.info('Scheduler started')
-
-
-async def stop_scheduler(application: Application) -> None:
-    scheduler = application.bot_data.get('scheduler')
-
-    if scheduler and scheduler.running:
-        scheduler.shutdown(wait=False)
-        await asyncio.sleep(0)
-        logger.info('Scheduler stopped')
+            return False
+    return True
 
 
 def filter_new_links(state_store: BotStateStore, scraped_links: list[ScrapedLink]) -> list[ScrapedLink]:
@@ -255,9 +218,18 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     chat_id = str(update.effective_chat.id)
+    await context.bot.send_message(chat_id=chat_id, text='Fetch started.')
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    await run_fetch(context, chat_id, manual=True)
+    fetch_coroutine = run_fetch(context.application, chat_id, manual=True)
+    try:
+        context.application.create_task(fetch_coroutine)
+    except Exception:
+        fetch_coroutine.close()
+        logger.exception('Could not schedule fetch task')
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text='Could not start fetch. Check bot logs.',
+        )
 
 
 async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -323,19 +295,11 @@ def build_application() -> Application:
 
     token = require_env('TELEGRAM_BOT_TOKEN')
     chat_id = require_env('TELEGRAM_CHAT_ID')
-    interval_hours = get_interval_hours()
-
     marketplaces = get_configured_marketplaces()
     state_store = BotStateStore()
     state_store.initialize()
 
-    application = (
-        Application.builder()
-        .token(token)
-        .post_init(start_scheduler)
-        .post_shutdown(stop_scheduler)
-        .build()
-    )
+    application = Application.builder().token(token).updater(None).build()
     application.bot_data['chat_id'] = chat_id
     application.bot_data['state_store'] = state_store
     application.add_handler(CommandHandler('start', start_command))
@@ -344,32 +308,8 @@ def build_application() -> Application:
     application.add_handler(CommandHandler('list', list_command))
     application.add_handler(CommandHandler('unset', unset_command))
 
-    scheduler = AsyncIOScheduler(timezone='UTC')
-    scheduler.add_job(
-        scheduled_fetch,
-        'interval',
-        hours=interval_hours,
-        args=[application, chat_id],
-        id='marketplace_fetch',
-        replace_existing=True,
-    )
-    application.bot_data['scheduler'] = scheduler
-
     logger.info(
-        'Configured %s marketplace(s), database %s, interval %s hour(s)',
+        'Configured %s marketplace(s) with Postgres state',
         len(marketplaces),
-        state_store.database_path,
-        interval_hours,
     )
-    logger.info('Telegram polling is starting')
-
     return application
-
-
-def main() -> None:
-    application = build_application()
-    application.run_polling()
-
-
-if __name__ == '__main__':
-    main()
