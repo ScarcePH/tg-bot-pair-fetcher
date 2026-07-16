@@ -3,7 +3,7 @@ name: Deploy to Cloud Run (Docker)
 on:
   push:
     branches:
-      - test-gh-action-postgres-requestdriven
+      - main
 
 env:
   SERVICE_NAME: tg-bot-pair-fetcher
