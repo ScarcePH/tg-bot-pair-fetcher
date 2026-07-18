@@ -31,6 +31,22 @@ Marketplace configuration stays in environment variables. `MARKETPLACES` is comm
 
 See [.env.example](.env.example) for a complete example.
 
+### Scraper behavior
+
+Marketplace/SKU combinations are scraped sequentially, with
+`SCRAPER_SCRAPE_DELAY_MS` controlling the delay between attempts (default
+`2000`). When a batch includes stealth marketplaces, it opens one shared
+`AsyncStealthySession(max_pages=1)` for the batch and uses DOM-loaded readiness
+(`load_dom=True`) for each stealth navigation. Each attempt defensively closes
+the page and browser context resources it receives before moving to the next
+combination.
+
+If a stealth attempt fails, the error is logged and that marketplace/SKU
+combination is skipped. The restored scraper does not automatically retry with
+a fresh session, replace the shared session, fall back to standard HTTP, or emit
+detailed per-attempt timing logs. Marketplaces explicitly configured with
+`FETCH_MODE=standard` continue to use the standard HTTP fetcher.
+
 ## HTTP API
 
 - `GET /healthz` returns service health.
