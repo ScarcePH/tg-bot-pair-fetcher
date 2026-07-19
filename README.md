@@ -12,6 +12,10 @@ TELEGRAM_CHAT_ID=123456789
 DATABASE_URL=postgresql://user:password@host:5432/database
 TELEGRAM_WEBHOOK_SECRET=replace-with-a-random-webhook-secret
 SCHEDULER_SECRET=replace-with-a-random-scheduler-secret
+CLOUD_TASKS_PROJECT_ID=replace-with-your-project-id
+CLOUD_TASKS_LOCATION=replace-with-your-cloud-run-region
+CLOUD_TASKS_QUEUE=tg-bot-fetch
+CLOUD_TASKS_TARGET_URL=https://replace-with-your-service-url/tasks/fetch
 PORT=8080
 ```
 
@@ -51,7 +55,7 @@ detailed per-attempt timing logs. Marketplaces explicitly configured with
 
 - `GET /healthz` returns service health.
 - `POST /telegram/webhook` accepts Telegram updates only when `X-Telegram-Bot-Api-Secret-Token` matches `TELEGRAM_WEBHOOK_SECRET`.
-- `POST /tasks/fetch` starts a scheduled fetch only when `X-Scheduler-Secret` matches `SCHEDULER_SECRET`.
+- `POST /tasks/fetch` starts a fetch only when `X-Scheduler-Secret` matches `SCHEDULER_SECRET`. Empty bodies remain valid for Cloud Scheduler; Cloud Tasks sends `{"manual": true}` for manual Telegram fetches.
 
 A Postgres advisory lock prevents overlapping `/fetch` and Scheduler runs across separate Cloud Run instances.
 
@@ -87,10 +91,18 @@ gcloud run deploy tg-bot-pair-fetcher \
   --source . \
   --region YOUR_REGION \
   --allow-unauthenticated \
-  --set-env-vars TELEGRAM_BOT_TOKEN=YOUR_TOKEN,TELEGRAM_CHAT_ID=YOUR_CHAT_ID,DATABASE_URL=YOUR_DATABASE_URL,TELEGRAM_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET,SCHEDULER_SECRET=YOUR_SCHEDULER_SECRET
+  --set-env-vars TELEGRAM_BOT_TOKEN=YOUR_TOKEN,TELEGRAM_CHAT_ID=YOUR_CHAT_ID,DATABASE_URL=YOUR_DATABASE_URL,TELEGRAM_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET,SCHEDULER_SECRET=YOUR_SCHEDULER_SECRET,CLOUD_TASKS_PROJECT_ID=YOUR_PROJECT_ID,CLOUD_TASKS_LOCATION=YOUR_REGION,CLOUD_TASKS_QUEUE=tg-bot-fetch,CLOUD_TASKS_TARGET_URL=https://YOUR_SERVICE_URL/tasks/fetch
 ```
 
 Also supply all marketplace variables, preferably through your normal Secret Manager/environment deployment configuration. Cloud Run may remain publicly reachable because both POST endpoints authenticate their own shared secret; `/healthz` is intentionally public.
+
+Keep request-based Cloud Run billing and set the Cloud Run request timeout long
+enough for the largest configured fetch batch. Before deploying, enable the
+Cloud Tasks API, create the `tg-bot-fetch` queue in the Cloud Run region, and
+grant the Cloud Run runtime service account `roles/cloudtasks.enqueuer`.
+Configure the queue for one concurrent dispatch and three delivery attempts.
+Queue creation, IAM, and runtime configuration are managed outside this
+application.
 
 Set the Telegram webhook after deployment:
 

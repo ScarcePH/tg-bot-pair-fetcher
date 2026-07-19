@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -64,6 +65,21 @@ def create_app(
     async def scheduled_fetch(request: Request) -> JSONResponse:
         if not _valid_secret(request, 'X-Scheduler-Secret', scheduler_secret):
             return JSONResponse({'detail': 'unauthorized'}, status_code=401)
+
+        body = await request.body()
+        if body.strip():
+            try:
+                payload = json.loads(body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return JSONResponse({'detail': 'invalid payload'}, status_code=400)
+
+            if not isinstance(payload, dict):
+                return JSONResponse({'detail': 'invalid payload'}, status_code=400)
+
+            manual = payload.get('manual', False)
+            if not isinstance(manual, bool):
+                return JSONResponse({'detail': 'invalid payload'}, status_code=400)
+
         chat_id = str(telegram_application.bot_data['chat_id'])
         completed = await run_fetch(telegram_application, chat_id)
         status = 'completed' if completed else 'already_running_or_failed'
@@ -78,4 +94,3 @@ def create_app(
         ],
         lifespan=lifespan,
     )
-
