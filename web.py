@@ -65,7 +65,7 @@ def create_app(
         if not _valid_secret(request, 'X-Scheduler-Secret', scheduler_secret):
             return JSONResponse({'detail': 'unauthorized'}, status_code=401)
         chat_id = str(telegram_application.bot_data['chat_id'])
-        completed = await run_fetch(telegram_application, chat_id, manual=False)
+        completed = await run_fetch(telegram_application, chat_id)
         status = 'completed' if completed else 'already_running_or_failed'
         return JSONResponse({'status': status})
 

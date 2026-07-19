@@ -89,13 +89,11 @@ def get_bot_data(context: Any) -> dict:
 async def run_fetch(
     context: Any,
     chat_id: str,
-    manual: bool = False,
 ) -> bool:
     state_store: BotStateStore = get_bot_data(context)['state_store']
     with state_store.fetch_lock() as lock_acquired:
         if not lock_acquired:
-            if manual:
-                await context.bot.send_message(chat_id=chat_id, text='A fetch is already running.')
+            await context.bot.send_message(chat_id=chat_id, text='A fetch is already running.')
             logger.info('Skipped fetch because another fetch is already running')
             return False
 
@@ -103,11 +101,10 @@ async def run_fetch(
             saved_searches = state_store.list_saved_searches()
 
             if not saved_searches:
-                if manual:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text='No saved SKUs. Use /set <sku> <name> first.',
-                    )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text='No saved SKUs. Use /set <sku> <name> first.',
+                )
                 return True
 
             scraped_links = await scrape_link_results(
@@ -131,12 +128,11 @@ async def run_fetch(
                         for link in new_links
                     ]
                 )
-            elif manual:
-                await context.bot.send_message(chat_id=chat_id, text='No new links found')
+
+            await context.bot.send_message(chat_id=chat_id, text='No new links found')
         except Exception:
             logger.exception('Fetch failed')
-            if manual:
-                await context.bot.send_message(chat_id=chat_id, text='Fetch failed. Check bot logs.')
+            await context.bot.send_message(chat_id=chat_id, text='Fetch failed. Check bot logs.')
             return False
     return True
 
@@ -220,7 +216,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = str(update.effective_chat.id)
     await context.bot.send_message(chat_id=chat_id, text='Fetch started.')
 
-    fetch_coroutine = run_fetch(context.application, chat_id, manual=True)
+    fetch_coroutine = run_fetch(context.application, chat_id)
     try:
         context.application.create_task(fetch_coroutine)
     except Exception:
