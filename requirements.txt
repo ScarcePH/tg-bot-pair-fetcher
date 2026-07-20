@@ -1,5 +1,6 @@
 python-telegram-bot==21.11.1
 python-dotenv==1.0.1
+google-cloud-tasks==2.23.0
 scrapling[fetchers]==0.4.8
 starlette==0.46.1
 uvicorn==0.34.0
