@@ -91,6 +91,7 @@ async def run_fetch(
     context: Any,
     chat_id: str,
 ) -> bool:
+    """Run the legacy all-SKU fetch path used by the standalone bot API."""
     state_store: BotStateStore = get_bot_data(context)['state_store']
     with state_store.fetch_lock() as lock_acquired:
         if not lock_acquired:
@@ -135,6 +136,64 @@ async def run_fetch(
             logger.exception('Fetch failed')
             await context.bot.send_message(chat_id=chat_id, text='Fetch failed. Check bot logs.')
             return False
+    return True
+
+
+async def run_sku_fetch(
+    context: Any,
+    chat_id: str,
+    saved_search: SavedSearch,
+) -> bool:
+    state_store: BotStateStore = get_bot_data(context)['state_store']
+    label = f'{saved_search.name} ({saved_search.sku})'
+
+    with state_store.fetch_lock() as lock_acquired:
+        if not lock_acquired:
+            logger.info(
+                'Skipped SKU fetch because another fetch is already running: %s',
+                saved_search.sku,
+            )
+            return False
+
+        try:
+            scraped_links = await scrape_link_results(
+                item_queries=[saved_search.sku],
+                raise_on_error=True,
+            )
+            new_links = filter_new_links(state_store, scraped_links)
+
+            if new_links:
+                await send_links(
+                    context,
+                    chat_id,
+                    format_scraped_links_for_telegram(
+                        new_links,
+                        [saved_search],
+                    ),
+                )
+                state_store.record_seen_links(
+                    [
+                        SeenLink(
+                            url=link.url,
+                            marketplace_key=link.marketplace_key,
+                            query=link.query,
+                        )
+                        for link in new_links
+                    ]
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f'No new links found for {label}.',
+                )
+        except Exception:
+            logger.exception('Fetch failed for SKU %s', saved_search.sku)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f'Fetch failed for {label}. Check bot logs.',
+            )
+            return False
+
     return True
 
 

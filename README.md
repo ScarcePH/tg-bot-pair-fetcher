@@ -62,11 +62,11 @@ detailed per-attempt timing logs. Marketplaces explicitly configured with
   `X-CloudScheduler-JobName` and `X-CloudScheduler-ScheduleTime`. It enqueues a
   deterministic Cloud Task and returns `202 {"status":"queued"}`.
 - `POST /tasks/fetch` is the Cloud Tasks worker endpoint. It requires the same
-  shared secret and an explicit boolean `manual` field. Telegram tasks send
-  `{"manual":true}` and scheduled tasks send `{"manual":false}`.
+  shared secret and accepts validated `batch` and `sku` payloads. A batch task
+  snapshots the saved SKUs and enqueues one deterministic child task per SKU;
+  each child scrapes that SKU across every configured marketplace.
 
-A Postgres advisory lock remains the final safeguard against overlapping fetch
-runs across separate Cloud Run instances.
+A Postgres advisory lock remains the final safeguard around each SKU worker.
 
 ## Local Run
 
@@ -105,13 +105,28 @@ gcloud run deploy tg-bot-pair-fetcher \
 
 Also supply all marketplace variables, preferably through your normal Secret Manager/environment deployment configuration. Cloud Run may remain publicly reachable because both POST endpoints authenticate their own shared secret; `/healthz` is intentionally public.
 
-Keep request-based Cloud Run billing and set the Cloud Run request timeout long
-enough for the largest configured fetch batch. Before deploying, enable the
-Cloud Tasks API, create the `tg-bot-fetch` queue in the Cloud Run region, and
-grant the Cloud Run runtime service account `roles/cloudtasks.enqueuer`.
-Configure the queue for one concurrent dispatch and three delivery attempts.
-Queue creation, IAM, and runtime configuration are managed outside this
-application.
+Keep request-based Cloud Run billing. The deployment workflow sets Cloud Run's
+request timeout to 540 seconds, and every created Cloud Task has an explicit
+600-second dispatch deadline. Before deploying, enable the Cloud Tasks API,
+create the `tg-bot-fetch` queue in the Cloud Run region, and grant the Cloud Run
+runtime service account `roles/cloudtasks.enqueuer`. Configure the queue for
+one concurrent dispatch and three delivery attempts:
+
+```sh
+gcloud tasks queues update tg-bot-fetch \
+  --location YOUR_REGION \
+  --max-concurrent-dispatches 1 \
+  --max-attempts 3
+
+gcloud tasks queues describe tg-bot-fetch \
+  --location YOUR_REGION \
+  --format='yaml(rateLimits.maxConcurrentDispatches,retryConfig.maxAttempts)'
+```
+
+Cloud Tasks does not guarantee FIFO execution order; task correctness relies
+on deterministic IDs, global link deduplication, and the advisory lock rather
+than dispatch order. Queue creation, IAM, and runtime configuration remain
+outside this application.
 
 Set the Telegram webhook after deployment:
 
@@ -147,9 +162,12 @@ zero between webhook, Scheduler, and Cloud Tasks requests.
 - `/set <sku> <name>`: saves or updates a SKU and refreshes one pinned aggregate list.
 - `/list`: lists saved SKU searches.
 - `/unset <sku>`: removes a saved SKU and refreshes the pinned list.
-- `/fetch`: searches all saved SKUs immediately.
+- `/fetch`: queues all saved SKUs for immediate per-SKU searches.
 
-Scheduled runs send nothing when no new links exist. URLs recorded in `seen_links` are deduplicated across all manual and scheduled runs.
+Each completed SKU sends its new links labeled with the saved name, or one
+SKU-specific no-results message. A failed SKU sends a concise failure message.
+URLs recorded in `seen_links` are deduplicated across all manual and scheduled
+runs.
 
 ## Tests
 

@@ -12,10 +12,39 @@ from starlette.routing import Route
 from telegram import Update
 from telegram.ext import Application
 
-from bot import build_application, require_env, run_fetch
+from bot import build_application, require_env, run_sku_fetch
+from state import BotStateStore, SavedSearch
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _valid_fetch_task_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    common_fields_valid = (
+        isinstance(payload.get('manual'), bool)
+        and _is_nonempty_string(payload.get('run_id'))
+    )
+    if not common_fields_valid:
+        return False
+
+    if payload.get('kind') == 'batch':
+        return set(payload) == {'kind', 'manual', 'run_id'}
+
+    if payload.get('kind') == 'sku':
+        return (
+            set(payload) == {'kind', 'manual', 'run_id', 'sku', 'name'}
+            and _is_nonempty_string(payload.get('sku'))
+            and _is_nonempty_string(payload.get('name'))
+        )
+
+    return False
 
 
 def _valid_secret(request: Request, header: str, expected: str) -> bool:
@@ -89,15 +118,41 @@ def create_app(
         except (ValueError, TypeError):
             return JSONResponse({'detail': 'invalid payload'}, status_code=400)
 
-        if (
-            not isinstance(payload, dict)
-            or 'manual' not in payload
-            or not isinstance(payload['manual'], bool)
-        ):
+        if not _valid_fetch_task_payload(payload):
             return JSONResponse({'detail': 'invalid payload'}, status_code=400)
 
+        task_queue = telegram_application.bot_data['fetch_task_queue']
         chat_id = str(telegram_application.bot_data['chat_id'])
-        completed = await run_fetch(telegram_application, chat_id)
+
+        if payload['kind'] == 'batch':
+            state_store: BotStateStore = telegram_application.bot_data[
+                'state_store'
+            ]
+            saved_searches = state_store.list_saved_searches()
+
+            if not saved_searches:
+                await telegram_application.bot.send_message(
+                    chat_id=chat_id,
+                    text='No saved SKUs. Use /set <sku> <name> first.',
+                )
+
+            for saved_search in saved_searches:
+                await task_queue.enqueue_sku_fetch(
+                    run_id=payload['run_id'],
+                    manual=payload['manual'],
+                    sku=saved_search.sku,
+                    name=saved_search.name,
+                )
+
+            return JSONResponse(
+                {'status': 'queued', 'tasks': len(saved_searches)},
+            )
+
+        completed = await run_sku_fetch(
+            telegram_application,
+            chat_id,
+            SavedSearch(sku=payload['sku'], name=payload['name']),
+        )
         status = 'completed' if completed else 'already_running_or_failed'
         return JSONResponse({'status': status})
 

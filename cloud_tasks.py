@@ -9,9 +9,13 @@ from urllib.parse import urlparse
 
 from google.api_core.exceptions import AlreadyExists
 from google.cloud import tasks_v2
+from google.protobuf import duration_pb2
 
 
 logger = logging.getLogger(__name__)
+
+
+FETCH_TASK_DISPATCH_DEADLINE_SECONDS = 600
 
 
 def _require_env(name: str) -> str:
@@ -75,10 +79,20 @@ class FetchTaskQueue:
         identity = f'{job_name}:{schedule_time}'.encode('utf-8')
         return f'scheduler-fetch-{hashlib.sha256(identity).hexdigest()}'
 
+    @staticmethod
+    def sku_task_id(run_id: str, sku: str) -> str:
+        identity = f'{run_id}:{sku}'.encode('utf-8')
+        return f'sku-fetch-{hashlib.sha256(identity).hexdigest()}'
+
     async def enqueue_manual_fetch(self, chat_id: str, update_id: int) -> None:
+        run_id = self.telegram_task_id(chat_id, update_id)
         await self._enqueue(
-            task_id=self.telegram_task_id(chat_id, update_id),
-            manual=True,
+            task_id=run_id,
+            payload={
+                'kind': 'batch',
+                'manual': True,
+                'run_id': run_id,
+            },
         )
 
     async def enqueue_scheduled_fetch(
@@ -86,12 +100,36 @@ class FetchTaskQueue:
         job_name: str,
         schedule_time: str,
     ) -> None:
+        run_id = self.scheduler_task_id(job_name, schedule_time)
         await self._enqueue(
-            task_id=self.scheduler_task_id(job_name, schedule_time),
-            manual=False,
+            task_id=run_id,
+            payload={
+                'kind': 'batch',
+                'manual': False,
+                'run_id': run_id,
+            },
         )
 
-    async def _enqueue(self, *, task_id: str, manual: bool) -> None:
+    async def enqueue_sku_fetch(
+        self,
+        *,
+        run_id: str,
+        manual: bool,
+        sku: str,
+        name: str,
+    ) -> None:
+        await self._enqueue(
+            task_id=self.sku_task_id(run_id, sku),
+            payload={
+                'kind': 'sku',
+                'manual': manual,
+                'run_id': run_id,
+                'sku': sku,
+                'name': name,
+            },
+        )
+
+    async def _enqueue(self, *, task_id: str, payload: dict[str, object]) -> None:
         parent = self.client.queue_path(
             self.project_id,
             self.location,
@@ -108,10 +146,13 @@ class FetchTaskQueue:
                     'X-Scheduler-Secret': self.scheduler_secret,
                 },
                 'body': json.dumps(
-                    {'manual': manual},
+                    payload,
                     separators=(',', ':'),
                 ).encode('utf-8'),
             },
+            'dispatch_deadline': duration_pb2.Duration(
+                seconds=FETCH_TASK_DISPATCH_DEADLINE_SECONDS,
+            ),
         }
 
         try:
