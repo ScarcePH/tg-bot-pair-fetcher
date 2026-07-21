@@ -260,7 +260,7 @@ async def is_allowed_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat:
+    if not await is_allowed_chat(update, context) or not update.effective_chat:
         return
 
     await context.bot.send_message(
