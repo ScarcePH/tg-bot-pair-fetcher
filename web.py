@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -66,19 +65,36 @@ def create_app(
         if not _valid_secret(request, 'X-Scheduler-Secret', scheduler_secret):
             return JSONResponse({'detail': 'unauthorized'}, status_code=401)
 
-        body = await request.body()
-        if body.strip():
-            try:
-                payload = json.loads(body)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                return JSONResponse({'detail': 'invalid payload'}, status_code=400)
+        job_name = request.headers.get('X-CloudScheduler-JobName', '').strip()
+        schedule_time = request.headers.get(
+            'X-CloudScheduler-ScheduleTime',
+            '',
+        ).strip()
+        if not job_name or not schedule_time:
+            return JSONResponse(
+                {'detail': 'missing scheduler headers'},
+                status_code=400,
+            )
 
-            if not isinstance(payload, dict):
-                return JSONResponse({'detail': 'invalid payload'}, status_code=400)
+        task_queue = telegram_application.bot_data['fetch_task_queue']
+        await task_queue.enqueue_scheduled_fetch(job_name, schedule_time)
+        return JSONResponse({'status': 'queued'}, status_code=202)
 
-            manual = payload.get('manual', False)
-            if not isinstance(manual, bool):
-                return JSONResponse({'detail': 'invalid payload'}, status_code=400)
+    async def fetch_task(request: Request) -> JSONResponse:
+        if not _valid_secret(request, 'X-Scheduler-Secret', scheduler_secret):
+            return JSONResponse({'detail': 'unauthorized'}, status_code=401)
+
+        try:
+            payload = await request.json()
+        except (ValueError, TypeError):
+            return JSONResponse({'detail': 'invalid payload'}, status_code=400)
+
+        if (
+            not isinstance(payload, dict)
+            or 'manual' not in payload
+            or not isinstance(payload['manual'], bool)
+        ):
+            return JSONResponse({'detail': 'invalid payload'}, status_code=400)
 
         chat_id = str(telegram_application.bot_data['chat_id'])
         completed = await run_fetch(telegram_application, chat_id)
@@ -90,7 +106,8 @@ def create_app(
             Route('/', root, methods=['GET']),
             Route('/healthz', healthz, methods=['GET']),
             Route('/telegram/webhook', telegram_webhook, methods=['POST']),
-            Route('/tasks/fetch', scheduled_fetch, methods=['POST']),
+            Route('/scheduler/fetch', scheduled_fetch, methods=['POST']),
+            Route('/tasks/fetch', fetch_task, methods=['POST']),
         ],
         lifespan=lifespan,
     )

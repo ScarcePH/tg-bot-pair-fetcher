@@ -36,7 +36,7 @@ def _validate_target_url(target_url: str) -> None:
         )
 
 
-class ManualFetchTaskQueue:
+class FetchTaskQueue:
     def __init__(
         self,
         *,
@@ -56,7 +56,7 @@ class ManualFetchTaskQueue:
         self.client = client or tasks_v2.CloudTasksAsyncClient()
 
     @classmethod
-    def from_env(cls, *, scheduler_secret: str) -> ManualFetchTaskQueue:
+    def from_env(cls, *, scheduler_secret: str) -> FetchTaskQueue:
         return cls(
             project_id=_require_env('CLOUD_TASKS_PROJECT_ID'),
             location=_require_env('CLOUD_TASKS_LOCATION'),
@@ -66,17 +66,38 @@ class ManualFetchTaskQueue:
         )
 
     @staticmethod
-    def task_id(chat_id: str, update_id: int) -> str:
+    def telegram_task_id(chat_id: str, update_id: int) -> str:
         identity = f'{chat_id}:{update_id}'.encode('utf-8')
         return f'telegram-fetch-{hashlib.sha256(identity).hexdigest()}'
 
+    @staticmethod
+    def scheduler_task_id(job_name: str, schedule_time: str) -> str:
+        identity = f'{job_name}:{schedule_time}'.encode('utf-8')
+        return f'scheduler-fetch-{hashlib.sha256(identity).hexdigest()}'
+
     async def enqueue_manual_fetch(self, chat_id: str, update_id: int) -> None:
+        await self._enqueue(
+            task_id=self.telegram_task_id(chat_id, update_id),
+            manual=True,
+        )
+
+    async def enqueue_scheduled_fetch(
+        self,
+        job_name: str,
+        schedule_time: str,
+    ) -> None:
+        await self._enqueue(
+            task_id=self.scheduler_task_id(job_name, schedule_time),
+            manual=False,
+        )
+
+    async def _enqueue(self, *, task_id: str, manual: bool) -> None:
         parent = self.client.queue_path(
             self.project_id,
             self.location,
             self.queue,
         )
-        task_name = f'{parent}/tasks/{self.task_id(chat_id, update_id)}'
+        task_name = f'{parent}/tasks/{task_id}'
         task = {
             'name': task_name,
             'http_request': {
@@ -87,7 +108,7 @@ class ManualFetchTaskQueue:
                     'X-Scheduler-Secret': self.scheduler_secret,
                 },
                 'body': json.dumps(
-                    {'manual': True},
+                    {'manual': manual},
                     separators=(',', ':'),
                 ).encode('utf-8'),
             },
@@ -101,4 +122,4 @@ class ManualFetchTaskQueue:
                 }
             )
         except AlreadyExists:
-            logger.info('Manual fetch task already exists: %s', task_name)
+            logger.info('Fetch task already exists: %s', task_name)

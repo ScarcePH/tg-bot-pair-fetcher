@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from cloud_tasks import ManualFetchTaskQueue
+from cloud_tasks import FetchTaskQueue
 from scraper import ScrapedLink, get_configured_marketplaces, scrape_link_results
 from state import BotStateStore, SavedSearch, SeenLink
 
@@ -218,8 +218,8 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await context.bot.send_message(chat_id=chat_id, text='Fetch started.')
 
     try:
-        task_queue: ManualFetchTaskQueue = context.application.bot_data[
-            'manual_fetch_task_queue'
+        task_queue: FetchTaskQueue = context.application.bot_data[
+            'fetch_task_queue'
         ]
         await task_queue.enqueue_manual_fetch(chat_id, update.update_id)
     except Exception:
@@ -297,14 +297,14 @@ def build_application() -> Application:
     state_store = BotStateStore()
     state_store.initialize()
     scheduler_secret = require_env('SCHEDULER_SECRET')
-    manual_fetch_task_queue = ManualFetchTaskQueue.from_env(
+    fetch_task_queue = FetchTaskQueue.from_env(
         scheduler_secret=scheduler_secret,
     )
 
     application = Application.builder().token(token).updater(None).build()
     application.bot_data['chat_id'] = chat_id
     application.bot_data['state_store'] = state_store
-    application.bot_data['manual_fetch_task_queue'] = manual_fetch_task_queue
+    application.bot_data['fetch_task_queue'] = fetch_task_queue
     application.add_handler(CommandHandler('start', start_command))
     application.add_handler(CommandHandler('fetch', fetch_command))
     application.add_handler(CommandHandler('set', set_command))
