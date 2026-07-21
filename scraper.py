@@ -288,6 +288,8 @@ async def scrape_links(
 async def scrape_link_results(
     marketplaces: list[Marketplace] | None = None,
     item_queries: list[str] | None = None,
+    *,
+    raise_on_error: bool = False,
 ) -> list[ScrapedLink]:
     marketplaces = marketplaces or get_configured_marketplaces()
     item_queries = item_queries or []
@@ -297,6 +299,7 @@ async def scrape_link_results(
     needs_stealth_session = any(marketplace.fetch_mode == FETCH_MODE_STEALTH for marketplace in marketplaces)
     total_attempts = len(marketplaces) * len(item_queries)
     completed_attempts = 0
+    failed_attempts = []
 
     async with AsyncExitStack() as stack:
         stealth_session = None
@@ -322,11 +325,19 @@ async def scrape_link_results(
                     )
                 except Exception:
                     logger.exception('Failed to scrape %s for "%s"', marketplace.key, query)
+                    failed_attempts.append((marketplace.key, query))
                 finally:
                     completed_attempts += 1
 
                     if completed_attempts < total_attempts and scrape_delay_ms:
                         await asyncio.sleep(scrape_delay_ms / 1000)
+
+    if failed_attempts and raise_on_error:
+        failed_labels = ', '.join(
+            f'{marketplace_key}/{query}'
+            for marketplace_key, query in failed_attempts
+        )
+        raise RuntimeError(f'Scrape failed for: {failed_labels}')
 
     return found_links
 

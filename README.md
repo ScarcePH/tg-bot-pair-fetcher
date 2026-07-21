@@ -1,6 +1,8 @@
 # Telegram Bot Pair Fetcher
 
-An HTTP webhook service for Google Cloud Run. Telegram delivers commands to the service, Cloud Scheduler triggers periodic marketplace scraping, and Postgres stores saved SKUs, pinned-message state, and globally deduplicated item links.
+An HTTP webhook service for Google Cloud Run. Telegram commands and Cloud
+Scheduler enqueue scraping through Cloud Tasks, while Postgres stores saved
+SKUs, pinned-message state, and globally deduplicated item links.
 
 ## Configuration
 
@@ -55,9 +57,16 @@ detailed per-attempt timing logs. Marketplaces explicitly configured with
 
 - `GET /healthz` returns service health.
 - `POST /telegram/webhook` accepts Telegram updates only when `X-Telegram-Bot-Api-Secret-Token` matches `TELEGRAM_WEBHOOK_SECRET`.
-- `POST /tasks/fetch` starts a fetch only when `X-Scheduler-Secret` matches `SCHEDULER_SECRET`. Empty bodies remain valid for Cloud Scheduler; Cloud Tasks sends `{"manual": true}` for manual Telegram fetches.
+- `POST /scheduler/fetch` accepts Cloud Scheduler requests only when
+  `X-Scheduler-Secret` matches `SCHEDULER_SECRET` and the request includes
+  `X-CloudScheduler-JobName` and `X-CloudScheduler-ScheduleTime`. It enqueues a
+  deterministic Cloud Task and returns `202 {"status":"queued"}`.
+- `POST /tasks/fetch` is the Cloud Tasks worker endpoint. It requires the same
+  shared secret and accepts validated `batch` and `sku` payloads. A batch task
+  snapshots the saved SKUs and enqueues one deterministic child task per SKU;
+  each child scrapes that SKU across every configured marketplace.
 
-A Postgres advisory lock prevents overlapping `/fetch` and Scheduler runs across separate Cloud Run instances.
+A Postgres advisory lock remains the final safeguard around each SKU worker.
 
 ## Local Run
 
@@ -96,13 +105,28 @@ gcloud run deploy tg-bot-pair-fetcher \
 
 Also supply all marketplace variables, preferably through your normal Secret Manager/environment deployment configuration. Cloud Run may remain publicly reachable because both POST endpoints authenticate their own shared secret; `/healthz` is intentionally public.
 
-Keep request-based Cloud Run billing and set the Cloud Run request timeout long
-enough for the largest configured fetch batch. Before deploying, enable the
-Cloud Tasks API, create the `tg-bot-fetch` queue in the Cloud Run region, and
-grant the Cloud Run runtime service account `roles/cloudtasks.enqueuer`.
-Configure the queue for one concurrent dispatch and three delivery attempts.
-Queue creation, IAM, and runtime configuration are managed outside this
-application.
+Keep request-based Cloud Run billing. The deployment workflow sets Cloud Run's
+request timeout to 540 seconds, and every created Cloud Task has an explicit
+600-second dispatch deadline. Before deploying, enable the Cloud Tasks API,
+create the `tg-bot-fetch` queue in the Cloud Run region, and grant the Cloud Run
+runtime service account `roles/cloudtasks.enqueuer`. Configure the queue for
+one concurrent dispatch and three delivery attempts:
+
+```sh
+gcloud tasks queues update tg-bot-fetch \
+  --location YOUR_REGION \
+  --max-concurrent-dispatches 1 \
+  --max-attempts 3
+
+gcloud tasks queues describe tg-bot-fetch \
+  --location YOUR_REGION \
+  --format='yaml(rateLimits.maxConcurrentDispatches,retryConfig.maxAttempts)'
+```
+
+Cloud Tasks does not guarantee FIFO execution order; task correctness relies
+on deterministic IDs, global link deduplication, and the advisory lock rather
+than dispatch order. Queue creation, IAM, and runtime configuration remain
+outside this application.
 
 Set the Telegram webhook after deployment:
 
@@ -118,12 +142,19 @@ Create an eight-hour Scheduler job:
 gcloud scheduler jobs create http tg-bot-pair-fetcher \
   --location YOUR_REGION \
   --schedule '0 */8 * * *' \
-  --uri 'https://YOUR_SERVICE_URL/tasks/fetch' \
+  --uri 'https://YOUR_SERVICE_URL/scheduler/fetch' \
   --http-method POST \
   --headers "X-Scheduler-Secret=${SCHEDULER_SECRET}"
 ```
 
-The service has no polling loop or in-process timer, so Cloud Run can scale to zero between webhook and Scheduler requests.
+Cloud Scheduler adds the job-name and schedule-time headers used to derive a
+stable task ID. If Scheduler retries the same invocation, the existing task is
+treated as a successful enqueue. When upgrading an existing deployment, update
+the Scheduler URI to `/scheduler/fetch` immediately after the compatible
+application version is deployed.
+
+The service has no polling loop or in-process timer, so Cloud Run can scale to
+zero between webhook, Scheduler, and Cloud Tasks requests.
 
 ## Telegram Commands
 
@@ -131,9 +162,12 @@ The service has no polling loop or in-process timer, so Cloud Run can scale to z
 - `/set <sku> <name>`: saves or updates a SKU and refreshes one pinned aggregate list.
 - `/list`: lists saved SKU searches.
 - `/unset <sku>`: removes a saved SKU and refreshes the pinned list.
-- `/fetch`: searches all saved SKUs immediately.
+- `/fetch`: queues all saved SKUs for immediate per-SKU searches.
 
-Scheduled runs send nothing when no new links exist. URLs recorded in `seen_links` are deduplicated across all manual and scheduled runs.
+Each completed SKU sends its new links labeled with the saved name, or one
+SKU-specific no-results message. A failed SKU sends a concise failure message.
+URLs recorded in `seen_links` are deduplicated across all manual and scheduled
+runs.
 
 ## Tests
 
