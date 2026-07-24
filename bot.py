@@ -355,10 +355,7 @@ def build_application() -> Application:
     marketplaces = get_configured_marketplaces()
     state_store = BotStateStore()
     state_store.initialize()
-    scheduler_secret = require_env('SCHEDULER_SECRET')
-    fetch_task_queue = FetchTaskQueue.from_env(
-        scheduler_secret=scheduler_secret,
-    )
+    fetch_task_queue = FetchTaskQueue.from_env()
 
     application = Application.builder().token(token).updater(None).build()
     application.bot_data['chat_id'] = chat_id

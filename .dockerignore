@@ -1,4 +1,7 @@
-.env
+.git/
+.github/
+.env*
+gha-creds-*.json
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -6,3 +9,8 @@ __pycache__/
 venv/
 .DS_Store
 README.md
+AGENTS.md
+tests/
+bot_state.sqlite3
+bot_state.sqlite3-*
+data/

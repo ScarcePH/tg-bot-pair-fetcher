@@ -13,11 +13,13 @@ TELEGRAM_BOT_TOKEN=123456789:replace-with-your-bot-token
 TELEGRAM_CHAT_ID=123456789
 DATABASE_URL=postgresql://user:password@host:5432/database
 TELEGRAM_WEBHOOK_SECRET=replace-with-a-random-webhook-secret
-SCHEDULER_SECRET=replace-with-a-random-scheduler-secret
+SERVICE_ROLE=webhook
 CLOUD_TASKS_PROJECT_ID=replace-with-your-project-id
 CLOUD_TASKS_LOCATION=replace-with-your-cloud-run-region
 CLOUD_TASKS_QUEUE=tg-bot-fetch
-CLOUD_TASKS_TARGET_URL=https://replace-with-your-service-url/tasks/fetch
+CLOUD_TASKS_TARGET_URL=https://replace-with-your-worker-url/tasks/fetch
+CLOUD_TASKS_OIDC_SERVICE_ACCOUNT=tg-bot-tasks-invoker@replace-with-your-project-id.iam.gserviceaccount.com
+CLOUD_TASKS_OIDC_AUDIENCE=https://replace-with-your-worker-url
 PORT=8080
 ```
 
@@ -55,16 +57,21 @@ detailed per-attempt timing logs. Marketplaces explicitly configured with
 
 ## HTTP API
 
-- `GET /healthz` returns service health.
-- `POST /telegram/webhook` accepts Telegram updates only when `X-Telegram-Bot-Api-Secret-Token` matches `TELEGRAM_WEBHOOK_SECRET`.
-- `POST /scheduler/fetch` accepts Cloud Scheduler requests only when
-  `X-Scheduler-Secret` matches `SCHEDULER_SECRET` and the request includes
-  `X-CloudScheduler-JobName` and `X-CloudScheduler-ScheduleTime`. It enqueues a
-  deterministic Cloud Task and returns `202 {"status":"queued"}`.
-- `POST /tasks/fetch` is the Cloud Tasks worker endpoint. It requires the same
-  shared secret and accepts validated `batch` and `sku` payloads. A batch task
-  snapshots the saved SKUs and enqueues one deterministic child task per SKU;
-  each child scrapes that SKU across every configured marketplace.
+- `SERVICE_ROLE=webhook` exposes `/`, `/healthz`, and `/telegram/webhook`.
+  Telegram updates still require the configured Telegram webhook secret.
+- `SERVICE_ROLE=worker` exposes `/healthz`, `/scheduler/fetch`, and
+  `/tasks/fetch`. Cloud Run IAM authenticates these routes before requests reach
+  the application.
+- `/scheduler/fetch` requires the Cloud Scheduler job-name and schedule-time
+  headers, enqueues a deterministic batch task, and returns
+  `202 {"status":"queued"}`.
+- `/tasks/fetch` accepts validated `batch` and `sku` payloads. A batch task
+  snapshots saved SKUs and enqueues one deterministic child task per SKU.
+
+Every Cloud Task carries an OIDC token for
+`CLOUD_TASKS_OIDC_SERVICE_ACCOUNT`, with the worker base URL as its audience.
+The public webhook service has no worker routes, so requests to either worker
+path return `404` even though the webhook service is unauthenticated.
 
 A Postgres advisory lock remains the final safeguard around each SKU worker.
 
@@ -75,7 +82,7 @@ Install dependencies and the Scrapling browser:
 ```sh
 pip install -r requirements.txt
 scrapling install
-uvicorn web:create_app --factory --host 0.0.0.0 --port 8080
+SERVICE_ROLE=webhook uvicorn web:create_app --factory --host 0.0.0.0 --port 8080
 ```
 
 Or run the same service in Docker:
@@ -93,17 +100,11 @@ python scraper.py
 
 ## Cloud Run Deployment
 
-One direct deployment flow with `gcloud` is:
-
-```sh
-gcloud run deploy tg-bot-pair-fetcher \
-  --source . \
-  --region YOUR_REGION \
-  --allow-unauthenticated \
-  --set-env-vars TELEGRAM_BOT_TOKEN=YOUR_TOKEN,TELEGRAM_CHAT_ID=YOUR_CHAT_ID,DATABASE_URL=YOUR_DATABASE_URL,TELEGRAM_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET,SCHEDULER_SECRET=YOUR_SCHEDULER_SECRET,CLOUD_TASKS_PROJECT_ID=YOUR_PROJECT_ID,CLOUD_TASKS_LOCATION=YOUR_REGION,CLOUD_TASKS_QUEUE=tg-bot-fetch,CLOUD_TASKS_TARGET_URL=https://YOUR_SERVICE_URL/tasks/fetch
-```
-
-Also supply all marketplace variables, preferably through your normal Secret Manager/environment deployment configuration. Cloud Run may remain publicly reachable because both POST endpoints authenticate their own shared secret; `/healthz` is intentionally public.
+Deploy the same tested image to a public webhook service and a private worker.
+Keep runtime secrets in Secret Manager and use distinct runtime and invoker
+service accounts. Follow
+[the ordered GCP OIDC cutover guide](docs/gcp-oidc-cutover.md) before enabling
+the two-service deployment workflow.
 
 Keep request-based Cloud Run billing. The deployment workflow sets Cloud Run's
 request timeout to 540 seconds, and every created Cloud Task has an explicit
@@ -136,15 +137,16 @@ curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   -d "{\"url\":\"https://YOUR_SERVICE_URL/telegram/webhook\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET}\"}"
 ```
 
-Create an eight-hour Scheduler job:
+Create an eight-hour Scheduler job that authenticates to the private worker:
 
 ```sh
 gcloud scheduler jobs create http tg-bot-pair-fetcher \
   --location YOUR_REGION \
   --schedule '0 */8 * * *' \
-  --uri 'https://YOUR_SERVICE_URL/scheduler/fetch' \
+  --uri 'https://YOUR_WORKER_URL/scheduler/fetch' \
   --http-method POST \
-  --headers "X-Scheduler-Secret=${SCHEDULER_SECRET}"
+  --oidc-service-account-email 'tg-bot-scheduler-invoker@YOUR_PROJECT_ID.iam.gserviceaccount.com' \
+  --oidc-token-audience 'https://YOUR_WORKER_URL'
 ```
 
 Cloud Scheduler adds the job-name and schedule-time headers used to derive a
@@ -173,6 +175,13 @@ runs.
 
 ```sh
 python -m unittest discover tests
+```
+
+Production and CI install the fully resolved, hashed `requirements.lock`.
+Regenerate it after changing a direct pin in `requirements.txt`:
+
+```sh
+pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
 ```
 
 Postgres integration tests are skipped unless `TEST_DATABASE_URL` points to a disposable test database. Those tests truncate the bot tables:
