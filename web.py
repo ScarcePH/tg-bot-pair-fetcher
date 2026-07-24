@@ -128,7 +128,9 @@ def create_app(
             return JSONResponse({'detail': 'invalid payload'}, status_code=400)
 
         task_queue = telegram_application.bot_data['fetch_task_queue']
-        chat_id = str(telegram_application.bot_data['chat_id'])
+        result_chat_id = str(
+            telegram_application.bot_data['result_chat_id']
+        )
 
         if payload['kind'] == 'batch':
             state_store: BotStateStore = telegram_application.bot_data[
@@ -138,7 +140,7 @@ def create_app(
 
             if not saved_searches:
                 await telegram_application.bot.send_message(
-                    chat_id=chat_id,
+                    chat_id=result_chat_id,
                     text='No saved SKUs. Use /set <sku> <name> first.',
                 )
 
@@ -156,7 +158,7 @@ def create_app(
 
         completed = await run_sku_fetch(
             telegram_application,
-            chat_id,
+            result_chat_id,
             SavedSearch(sku=payload['sku'], name=payload['name']),
         )
         status = 'completed' if completed else 'already_running_or_failed'

@@ -45,7 +45,7 @@ Private worker /tasks/fetch
     ├── acquires the Postgres advisory lock
     ├── scrapes the configured marketplaces for one SKU
     ├── records new links in Postgres
-    └── sends the SKU result to Telegram
+    └── sends the SKU result to the Telegram result channel
 ```
 
 
@@ -102,15 +102,21 @@ requests reach the application.
 
 ## Telegram commands
 
+Commands are accepted only from the private control chat configured by
+`TELEGRAM_CHAT_ID`. Updates from the result channel and all other chats are
+silently ignored. Command replies, including the immediate `/fetch`
+acknowledgement and any enqueue error, stay in the private chat.
+
 - `/start` — show help.
 - `/set <sku> <name>` — save or rename a SKU and refresh the pinned list.
 - `/list` — list saved SKU searches.
 - `/unset <sku>` — remove a SKU and refresh the pinned list.
 - `/fetch` — acknowledge immediately and enqueue all saved SKUs.
 
-Each SKU task sends new links, a no-results message, or a concise failure
-message. Links in `seen_links` are deduplicated across manual and scheduled
-runs.
+Each manual or scheduled SKU task sends new links, a no-results message, or a
+concise failure message to `TELEGRAM_RESULT_CHAT_ID`. A batch with no saved
+SKUs also reports that outcome to the result channel. Links in `seen_links` are
+deduplicated across manual and scheduled runs.
 
 ## Configuration
 
@@ -122,7 +128,8 @@ the common settings below.
 | --- | --- | --- | --- |
 | `SERVICE_ROLE` | `webhook` | `worker` | Registers only that role's routes. |
 | `TELEGRAM_BOT_TOKEN` | Required | Required | Receive commands and send results. |
-| `TELEGRAM_CHAT_ID` | Required | Required | Restrict commands and select the result chat. |
+| `TELEGRAM_CHAT_ID` | Required | Required | Private control chat; restrict commands and receive command replies. |
+| `TELEGRAM_RESULT_CHAT_ID` | Required | Required | Channel that receives manual and scheduled fetch outcomes. |
 | `DATABASE_URL` | Required | Required | Store searches, seen links, and chat state. |
 | `TELEGRAM_WEBHOOK_SECRET` | Required | Not used | Validate Telegram webhook requests. |
 | `CLOUD_TASKS_PROJECT_ID` | Required | Required | Queue project. |
@@ -155,6 +162,22 @@ MARKETPLACE_MARKETPLACE_A_FETCH_WAIT_MS=0
 Keep secret values in Secret Manager. `TELEGRAM_WEBHOOK_SECRET` may contain only
 letters, numbers, `_`, and `-`. The application no longer reads
 `SCHEDULER_SECRET`; Scheduler and Tasks use IAM/OIDC.
+
+Add the bot to the result channel as an administrator with only the **Post
+Messages** permission (`can_post_messages` in the [Telegram Bot
+API](https://core.telegram.org/bots/api#chatadministratorrights)), then obtain
+the channel's numeric Bot API chat ID (normally beginning with `-100`).
+Configure the private chat and channel separately:
+
+```env
+TELEGRAM_CHAT_ID=123456789
+TELEGRAM_RESULT_CHAT_ID=-1001234567890
+```
+
+Keep both numeric IDs in Cloud Run runtime configuration or Secret Manager;
+do not hardcode or commit them. Because both roles initialize the shared
+application, set `TELEGRAM_RESULT_CHAT_ID` on both the webhook and worker
+services before deploying code that requires it.
 
 The database account must be able to create `saved_searches`, `seen_links`, and
 `chat_state`; startup creates them automatically.

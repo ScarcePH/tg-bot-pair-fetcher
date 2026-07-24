@@ -3,26 +3,36 @@ from __future__ import annotations
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 try:
     from bot import (
         TELEGRAM_MESSAGE_LIMIT,
+        build_application,
         fetch_command,
         filter_new_links,
         format_scraped_links_for_telegram,
+        list_command,
         run_sku_fetch,
+        set_command,
+        start_command,
         split_links_for_telegram,
+        unset_command,
     )
     from scraper import ScrapedLink
     from state import BotStateStore, SavedSearch, SeenLink
 except ModuleNotFoundError as exc:
     TELEGRAM_MESSAGE_LIMIT = None
+    build_application = None
     fetch_command = None
     filter_new_links = None
     format_scraped_links_for_telegram = None
+    list_command = None
     run_sku_fetch = None
+    set_command = None
+    start_command = None
     split_links_for_telegram = None
+    unset_command = None
     ScrapedLink = None
     BotStateStore = None
     SavedSearch = None
@@ -34,6 +44,21 @@ else:
 
 @unittest.skipIf(IMPORT_ERROR is not None, f'missing optional dependency: {IMPORT_ERROR}')
 class BotHelperTest(unittest.TestCase):
+    def test_build_application_requires_result_chat_id(self) -> None:
+        with (
+            patch.dict(
+                'os.environ',
+                {
+                    'TELEGRAM_BOT_TOKEN': '123:token',
+                    'TELEGRAM_CHAT_ID': '123',
+                },
+                clear=True,
+            ),
+            patch('bot.load_dotenv'),
+            self.assertRaisesRegex(ValueError, 'TELEGRAM_RESULT_CHAT_ID is required'),
+        ):
+            build_application()
+
     @staticmethod
     def make_sku_fetch_context(seen_urls=None):
         seen_urls = set(seen_urls or [])
@@ -251,6 +276,7 @@ class BotHelperTest(unittest.TestCase):
                 )
                 self.bot_data = {
                     'chat_id': '123',
+                    'result_chat_id': '-100456',
                     'fetch_task_queue': task_queue,
                 }
 
@@ -285,6 +311,7 @@ class BotHelperTest(unittest.TestCase):
         class FakeApplication:
             bot_data = {
                 'chat_id': '123',
+                'result_chat_id': '-100456',
                 'fetch_task_queue': SimpleNamespace(
                     enqueue_manual_fetch=AsyncMock(
                         side_effect=RuntimeError('queue unavailable')
@@ -322,6 +349,97 @@ class BotHelperTest(unittest.TestCase):
                 {'chat_id': '123', 'text': 'Could not start fetch. Check bot logs.'},
             ],
         )
+
+    def test_control_commands_execute_and_reply_in_private_chat(self) -> None:
+        saved_search = SavedSearch(sku='sku-a', name='NAME A')
+        state_store = SimpleNamespace(
+            upsert_saved_search=Mock(return_value=saved_search),
+            list_saved_searches=Mock(return_value=[saved_search]),
+            delete_saved_search=Mock(return_value=True),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    'chat_id': '123',
+                    'result_chat_id': '-100456',
+                    'state_store': state_store,
+                },
+            ),
+            bot=SimpleNamespace(send_message=AsyncMock()),
+            args=['sku-a', 'NAME A'],
+        )
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id='123'),
+            update_id=456,
+        )
+
+        async def run_test() -> None:
+            with patch(
+                'bot.update_saved_searches_pin',
+                new=AsyncMock(),
+            ) as update_pin:
+                await start_command(update, context)
+                await set_command(update, context)
+                await list_command(update, context)
+                context.args = ['sku-a']
+                await unset_command(update, context)
+
+            self.assertEqual(update_pin.await_count, 2)
+
+        import asyncio
+        asyncio.run(run_test())
+
+        self.assertEqual(
+            [call.kwargs['chat_id'] for call in context.bot.send_message.await_args_list],
+            ['123', '123', '123', '123'],
+        )
+        state_store.upsert_saved_search.assert_called_once_with('sku-a', 'NAME A')
+        state_store.list_saved_searches.assert_called_once_with()
+        state_store.delete_saved_search.assert_called_once_with('sku-a')
+
+    def test_commands_from_result_and_unauthorized_chats_are_silently_ignored(self) -> None:
+        state_store = SimpleNamespace(
+            upsert_saved_search=Mock(),
+            list_saved_searches=Mock(),
+            delete_saved_search=Mock(),
+        )
+        task_queue = SimpleNamespace(enqueue_manual_fetch=AsyncMock())
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    'chat_id': '123',
+                    'result_chat_id': '-100456',
+                    'state_store': state_store,
+                    'fetch_task_queue': task_queue,
+                },
+            ),
+            bot=SimpleNamespace(send_message=AsyncMock()),
+            args=['sku-a', 'NAME A'],
+        )
+
+        async def run_test() -> None:
+            for chat_id in ('-100456', '999'):
+                update = SimpleNamespace(
+                    effective_chat=SimpleNamespace(id=chat_id),
+                    update_id=456,
+                )
+                for command in (
+                    start_command,
+                    fetch_command,
+                    set_command,
+                    list_command,
+                    unset_command,
+                ):
+                    await command(update, context)
+
+        import asyncio
+        asyncio.run(run_test())
+
+        context.bot.send_message.assert_not_awaited()
+        task_queue.enqueue_manual_fetch.assert_not_awaited()
+        state_store.upsert_saved_search.assert_not_called()
+        state_store.list_saved_searches.assert_not_called()
+        state_store.delete_saved_search.assert_not_called()
 
 
 if __name__ == '__main__':
