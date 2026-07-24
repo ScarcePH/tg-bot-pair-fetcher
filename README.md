@@ -1,175 +1,223 @@
 # Telegram Bot Pair Fetcher
 
-An HTTP webhook service for Google Cloud Run. Telegram commands and Cloud
-Scheduler enqueue scraping through Cloud Tasks, while Postgres stores saved
-SKUs, pinned-message state, and globally deduplicated item links.
+A Python Telegram bot that saves SKU searches, scrapes configured
+marketplaces, and reports new item links. It runs on Google Cloud as two Cloud
+Run services built from the same image:
+
+- `tg-bot-pair-fetcher`: public Telegram webhook (`SERVICE_ROLE=webhook`).
+- `tg-bot-pair-fetcher-worker`: private Scheduler and Cloud Tasks worker
+  (`SERVICE_ROLE=worker`).
+
+Long-running scraping never runs inside the public webhook request. Telegram
+commands and Cloud Scheduler create deterministic Cloud Tasks; the worker fans
+each batch out into one bounded task per SKU. Postgres stores searches, pinned
+message state, global link deduplication, and the advisory lock used to prevent
+overlapping SKU work.
+
+## Architecture
+
+### Telegram `/fetch`
+
+```text
+Telegram
+    │ POST /telegram/webhook + Telegram secret
+    ▼
+Public Cloud Run webhook (tg-bot-pair-fetcher)
+    │ runtime: <webhook-runtime>
+    │ replies to Telegram immediately, then creates a batch task
+    │ Cloud Tasks Enqueuer on tg-bot-fetch
+    ▼
+Cloud Tasks queue (tg-bot-fetch)
+    │ dispatches POST /tasks/fetch
+    │ OIDC identity: <tasks-invoker>
+    ▼
+Private Cloud Run worker (tg-bot-pair-fetcher-worker)
+    │ Cloud Run allows the request because <tasks-invoker>
+    │ has Cloud Run Invoker on the worker service
+    │
+    │ batch task reads saved SKUs from Postgres
+    │ worker runtime creates one deterministic child task per SKU
+    ▼
+Cloud Tasks queue (tg-bot-fetch)
+    │ OIDC identity: <tasks-invoker>
+    ▼
+Private worker /tasks/fetch
+    ├── acquires the Postgres advisory lock
+    ├── scrapes the configured marketplaces for one SKU
+    ├── records new links in Postgres
+    └── sends the SKU result to Telegram
+```
+
+
+### Scheduled fetch
+
+```text
+Cloud Scheduler (every eight hours)
+    │ POST /scheduler/fetch
+    │ OIDC identity: <scheduler-invoker>
+    ▼
+Private Cloud Run worker
+    │ validates Cloud Scheduler headers
+    │ creates a deterministic batch task as <worker-runtime>
+    ▼
+tg-bot-fetch queue → batch task → one child task per SKU → scrape and report
+```
+
+The queue is intentionally limited to one concurrent dispatch. Cloud Tasks does
+not guarantee FIFO order, so correctness comes from deterministic task IDs,
+Postgres deduplication, and the advisory lock—not task ordering.
+
+### Runtime IAM
+
+| Account | Role | Applied to | Purpose |
+| --- | --- | --- | --- |
+| `<webhook-runtime>` | Cloud Tasks Enqueuer | `tg-bot-fetch` queue | Create Telegram-triggered batch tasks. |
+| `<webhook-runtime>` | Service Account User | `<tasks-invoker>` | Attach the task invoker identity when creating tasks. |
+| `<worker-runtime>` | Cloud Tasks Enqueuer | `tg-bot-fetch` queue | Create scheduled batch tasks and per-SKU child tasks. |
+| `<worker-runtime>` | Service Account User | `<tasks-invoker>` | Attach the task invoker identity when creating tasks. |
+| `<tasks-invoker>` | Cloud Run Invoker | `tg-bot-pair-fetcher-worker` | Deliver authenticated Cloud Tasks requests to the private worker. |
+| `<scheduler-invoker>` | Cloud Run Invoker | `tg-bot-pair-fetcher-worker` | Invoke `/scheduler/fetch` from Cloud Scheduler. |
+| Google-managed Cloud Tasks service agent | Cloud Tasks Service Agent | Project | Generate OIDC tokens and deliver authenticated task requests. |
+| Google-managed Cloud Scheduler service agent | Cloud Scheduler Service Agent | Project | Generate the Scheduler OIDC token and deliver the scheduled request. |
+
+The infrastructure/deployer identity also needs Service Account User on
+runtime identities when it creates or updates Cloud Run services and Scheduler
+jobs. That deployment permission is separate from the runtime request flow
+above.
+
+## HTTP routes
+
+| Service role | Route | Access | Behavior |
+| --- | --- | --- | --- |
+| `webhook` | `GET /` | Public | Basic running response. |
+| `webhook` | `GET /healthz` | Public | Health check. |
+| `webhook` | `POST /telegram/webhook` | Public + Telegram webhook secret | Processes Telegram updates. |
+| `worker` | `GET /healthz` | Private Cloud Run service | Health check. |
+| `worker` | `POST /scheduler/fetch` | Scheduler OIDC | Enqueues one deterministic batch task and returns `202`. |
+| `worker` | `POST /tasks/fetch` | Cloud Tasks OIDC | Handles a `batch` or one `sku` task. |
+
+The webhook service does not register worker routes. The worker should have no
+`allUsers` invoker binding; Cloud Run verifies Google-signed OIDC tokens before
+requests reach the application.
+
+## Telegram commands
+
+- `/start` — show help.
+- `/set <sku> <name>` — save or rename a SKU and refresh the pinned list.
+- `/list` — list saved SKU searches.
+- `/unset <sku>` — remove a SKU and refresh the pinned list.
+- `/fetch` — acknowledge immediately and enqueue all saved SKUs.
+
+Each SKU task sends new links, a no-results message, or a concise failure
+message. Links in `seen_links` are deduplicated across manual and scheduled
+runs.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set:
+Copy `.env.example` to `.env`. Both roles currently initialize the shared bot,
+database, marketplace configuration, and Cloud Tasks client, so both require
+the common settings below.
+
+| Setting | Webhook | Worker | Purpose |
+| --- | --- | --- | --- |
+| `SERVICE_ROLE` | `webhook` | `worker` | Registers only that role's routes. |
+| `TELEGRAM_BOT_TOKEN` | Required | Required | Receive commands and send results. |
+| `TELEGRAM_CHAT_ID` | Required | Required | Restrict commands and select the result chat. |
+| `DATABASE_URL` | Required | Required | Store searches, seen links, and chat state. |
+| `TELEGRAM_WEBHOOK_SECRET` | Required | Not used | Validate Telegram webhook requests. |
+| `CLOUD_TASKS_PROJECT_ID` | Required | Required | Queue project. |
+| `CLOUD_TASKS_LOCATION` | Required | Required | Queue region. |
+| `CLOUD_TASKS_QUEUE` | Required | Required | Queue name, normally `tg-bot-fetch`. |
+| `CLOUD_TASKS_TARGET_URL` | Required | Required | Worker HTTPS URL ending in `/tasks/fetch`. |
+| `CLOUD_TASKS_OIDC_SERVICE_ACCOUNT` | Required | Required | Task identity, normally `<tasks-invoker>`. |
+| `CLOUD_TASKS_OIDC_AUDIENCE` | Required | Required | Worker base URL, without `/tasks/fetch`. |
+| `MARKETPLACES` and `MARKETPLACE_<KEY>_*` | Required | Required | Marketplace routing and fetch configuration. |
+
+For every comma-separated key in `MARKETPLACES`, configure:
 
 ```env
-TELEGRAM_BOT_TOKEN=123456789:replace-with-your-bot-token
-TELEGRAM_CHAT_ID=123456789
-DATABASE_URL=postgresql://user:password@host:5432/database
-TELEGRAM_WEBHOOK_SECRET=replace-with-a-random-webhook-secret
-SERVICE_ROLE=webhook
-CLOUD_TASKS_PROJECT_ID=replace-with-your-project-id
-CLOUD_TASKS_LOCATION=replace-with-your-cloud-run-region
-CLOUD_TASKS_QUEUE=tg-bot-fetch
-CLOUD_TASKS_TARGET_URL=https://replace-with-your-worker-url/tasks/fetch
-CLOUD_TASKS_OIDC_SERVICE_ACCOUNT=tg-bot-tasks-invoker@replace-with-your-project-id.iam.gserviceaccount.com
-CLOUD_TASKS_OIDC_AUDIENCE=https://replace-with-your-worker-url
-PORT=8080
+MARKETPLACES=marketplace_a
+MARKETPLACE_MARKETPLACE_A_BASE_URL=https://market.example
+MARKETPLACE_MARKETPLACE_A_SEARCH_URL_TEMPLATE=https://market.example/search?q={query}
+MARKETPLACE_MARKETPLACE_A_ITEM_HOSTS=market.example,www.market.example
+MARKETPLACE_MARKETPLACE_A_ITEM_PATH_MARKERS=/item/,/product/
+MARKETPLACE_MARKETPLACE_A_FETCH_MODE=standard
+MARKETPLACE_MARKETPLACE_A_FETCH_WAIT_MS=0
 ```
 
-The database user must be able to create the `saved_searches`, `seen_links`, and `chat_state` tables. Tables are created automatically at startup. Use a Postgres URL reachable from Cloud Run; for Cloud SQL, configure the Cloud Run connection/network path appropriate to the URL.
+`BASE_URL`, `SEARCH_URL_TEMPLATE` (with `{query}`), `ITEM_HOSTS`, and
+`ITEM_PATH_MARKERS` are required. `FETCH_MODE` (`standard` or `stealth`) and
+`FETCH_WAIT_MS` are optional. Global browser settings include
+`SCRAPER_ACCEPT_LANGUAGE`, `SCRAPER_SCRAPE_DELAY_MS` (default `2000`),
+`SCRAPER_STEALTH_LOCALE` (default `en-US`), and
+`SCRAPER_STEALTH_TIMEZONE` (default `UTC`). `PORT` defaults to `8080`.
 
-`TELEGRAM_WEBHOOK_SECRET` must use only characters accepted by Telegram (`A-Z`, `a-z`, `0-9`, `_`, and `-`). Generate secrets independently, for example:
+Keep secret values in Secret Manager. `TELEGRAM_WEBHOOK_SECRET` may contain only
+letters, numbers, `_`, and `-`. The application no longer reads
+`SCHEDULER_SECRET`; Scheduler and Tasks use IAM/OIDC.
 
-```sh
-openssl rand -hex 32
-```
+The database account must be able to create `saved_searches`, `seen_links`, and
+`chat_state`; startup creates them automatically.
 
-Marketplace configuration stays in environment variables. `MARKETPLACES` is comma-separated, and each key has matching `MARKETPLACE_<KEY>_*` values:
-
-- Required: `BASE_URL`, `SEARCH_URL_TEMPLATE` (containing `{query}`), `ITEM_HOSTS`, and `ITEM_PATH_MARKERS`.
-- Optional: `FETCH_MODE` (`standard` or `stealth`) and non-negative `FETCH_WAIT_MS`.
-- Optional browser settings: `SCRAPER_ACCEPT_LANGUAGE`, `SCRAPER_SCRAPE_DELAY_MS` (global delay between scrape attempts, default `2000`), `SCRAPER_STEALTH_LOCALE`, and `SCRAPER_STEALTH_TIMEZONE`.
-
-See [.env.example](.env.example) for a complete example.
-
-### Scraper behavior
-
-Marketplace/SKU combinations are scraped sequentially, with
-`SCRAPER_SCRAPE_DELAY_MS` controlling the delay between attempts (default
-`2000`). When a batch includes stealth marketplaces, it opens one shared
-`AsyncStealthySession(max_pages=1)` for the batch and uses DOM-loaded readiness
-(`load_dom=True`) for each stealth navigation. Each attempt defensively closes
-the page and browser context resources it receives before moving to the next
-combination.
-
-If a stealth attempt fails, the error is logged and that marketplace/SKU
-combination is skipped. The restored scraper does not automatically retry with
-a fresh session, replace the shared session, fall back to standard HTTP, or emit
-detailed per-attempt timing logs. Marketplaces explicitly configured with
-`FETCH_MODE=standard` continue to use the standard HTTP fetcher.
-
-## HTTP API
-
-- `SERVICE_ROLE=webhook` exposes `/`, `/healthz`, and `/telegram/webhook`.
-  Telegram updates still require the configured Telegram webhook secret.
-- `SERVICE_ROLE=worker` exposes `/healthz`, `/scheduler/fetch`, and
-  `/tasks/fetch`. Cloud Run IAM authenticates these routes before requests reach
-  the application.
-- `/scheduler/fetch` requires the Cloud Scheduler job-name and schedule-time
-  headers, enqueues a deterministic batch task, and returns
-  `202 {"status":"queued"}`.
-- `/tasks/fetch` accepts validated `batch` and `sku` payloads. A batch task
-  snapshots saved SKUs and enqueues one deterministic child task per SKU.
-
-Every Cloud Task carries an OIDC token for
-`CLOUD_TASKS_OIDC_SERVICE_ACCOUNT`, with the worker base URL as its audience.
-The public webhook service has no worker routes, so requests to either worker
-path return `404` even though the webhook service is unauthenticated.
-
-A Postgres advisory lock remains the final safeguard around each SKU worker.
-
-## Local Run
-
-Install dependencies and the Scrapling browser:
+## Run locally
 
 ```sh
 pip install -r requirements.txt
 scrapling install
+python -m unittest discover tests
 SERVICE_ROLE=webhook uvicorn web:create_app --factory --host 0.0.0.0 --port 8080
 ```
 
-Or run the same service in Docker:
+Or use the production-like container:
 
 ```sh
 docker compose up --build
 curl http://localhost:8080/healthz
 ```
 
-The standalone scraper still reads saved SKUs from Postgres:
+The standalone scraper reads saved SKUs from Postgres:
 
 ```sh
 python scraper.py
 ```
 
-## Cloud Run Deployment
+## Deploy and operate
 
-Deploy the same tested image to a public webhook service and a private worker.
-Keep runtime secrets in Secret Manager and use distinct runtime and invoker
-service accounts. Follow
-[the ordered GCP OIDC cutover guide](docs/gcp-oidc-cutover.md) before enabling
-the two-service deployment workflow.
+The GitHub Actions workflow tests and audits the app, builds one image, and
+deploys that image to both Cloud Run roles using keyless Workload Identity
+Federation. Shared infrastructure—IAM, service accounts, Cloud Run settings,
+the queue, Scheduler, secrets metadata.
 
-Keep request-based Cloud Run billing. The deployment workflow sets Cloud Run's
-request timeout to 540 seconds, and every created Cloud Task has an explicit
-600-second dispatch deadline. Before deploying, enable the Cloud Tasks API,
-create the `tg-bot-fetch` queue in the Cloud Run region, and grant the Cloud Run
-runtime service account `roles/cloudtasks.enqueuer`. Configure the queue for
-one concurrent dispatch and three delivery attempts:
+Production assumptions:
+
+- Worker timeout: 540 seconds.
+- Cloud Task dispatch deadline: 600 seconds.
+- Worker concurrency and maximum instances: 1.
+- Queue maximum concurrent dispatches: 1.
+- Queue delivery attempts: 3.
+- Scheduler target: `POST https://WORKER_URL/scheduler/fetch` with worker base
+  URL as the OIDC audience.
+- Task target: `POST https://WORKER_URL/tasks/fetch` with worker base URL as
+  the OIDC audience.
+
+Set the Telegram webhook after the public service is available:
 
 ```sh
-gcloud tasks queues update tg-bot-fetch \
-  --location YOUR_REGION \
-  --max-concurrent-dispatches 1 \
-  --max-attempts 3
+curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+  -H 'Content-Type: application/json' \
+  -d "{\"url\":\"https://WEBHOOK_URL/telegram/webhook\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET}\"}"
+```
 
+Useful queue verification:
+
+```sh
 gcloud tasks queues describe tg-bot-fetch \
   --location YOUR_REGION \
   --format='yaml(rateLimits.maxConcurrentDispatches,retryConfig.maxAttempts)'
 ```
 
-Cloud Tasks does not guarantee FIFO execution order; task correctness relies
-on deterministic IDs, global link deduplication, and the advisory lock rather
-than dispatch order. Queue creation, IAM, and runtime configuration remain
-outside this application.
-
-Set the Telegram webhook after deployment:
-
-```sh
-curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-  -H 'Content-Type: application/json' \
-  -d "{\"url\":\"https://YOUR_SERVICE_URL/telegram/webhook\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET}\"}"
-```
-
-Create an eight-hour Scheduler job that authenticates to the private worker:
-
-```sh
-gcloud scheduler jobs create http tg-bot-pair-fetcher \
-  --location YOUR_REGION \
-  --schedule '0 */8 * * *' \
-  --uri 'https://YOUR_WORKER_URL/scheduler/fetch' \
-  --http-method POST \
-  --oidc-service-account-email 'tg-bot-scheduler-invoker@YOUR_PROJECT_ID.iam.gserviceaccount.com' \
-  --oidc-token-audience 'https://YOUR_WORKER_URL'
-```
-
-Cloud Scheduler adds the job-name and schedule-time headers used to derive a
-stable task ID. If Scheduler retries the same invocation, the existing task is
-treated as a successful enqueue. When upgrading an existing deployment, update
-the Scheduler URI to `/scheduler/fetch` immediately after the compatible
-application version is deployed.
-
-The service has no polling loop or in-process timer, so Cloud Run can scale to
-zero between webhook, Scheduler, and Cloud Tasks requests.
-
-## Telegram Commands
-
-- `/start`: shows command help.
-- `/set <sku> <name>`: saves or updates a SKU and refreshes one pinned aggregate list.
-- `/list`: lists saved SKU searches.
-- `/unset <sku>`: removes a saved SKU and refreshes the pinned list.
-- `/fetch`: queues all saved SKUs for immediate per-SKU searches.
-
-Each completed SKU sends its new links labeled with the saved name, or one
-SKU-specific no-results message. A failed SKU sends a concise failure message.
-URLs recorded in `seen_links` are deduplicated across all manual and scheduled
-runs.
+Cloud Run can scale to zero between Telegram, Scheduler, and Cloud Tasks
+requests because the service has no polling loop or in-process timer.
 
 ## Tests
 
@@ -177,16 +225,17 @@ runs.
 python -m unittest discover tests
 ```
 
-Production and CI install the fully resolved, hashed `requirements.lock`.
-Regenerate it after changing a direct pin in `requirements.txt`:
-
-```sh
-pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
-```
-
-Postgres integration tests are skipped unless `TEST_DATABASE_URL` points to a disposable test database. Those tests truncate the bot tables:
+Postgres integration tests require a disposable database and truncate the bot
+tables:
 
 ```sh
 TEST_DATABASE_URL=postgresql://user:password@localhost:5432/bot_test \
   python -m unittest tests.test_state
+```
+
+Production and CI install the hashed lockfile. Regenerate it after changing a
+direct dependency:
+
+```sh
+pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
 ```
