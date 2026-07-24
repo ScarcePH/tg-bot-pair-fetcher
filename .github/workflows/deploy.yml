@@ -1,4 +1,4 @@
-name: Deploy to Cloud Run (Docker)
+name: Deploy to Cloud Run
 
 on:
   push:
@@ -7,30 +7,69 @@ on:
 
 env:
   SERVICE_NAME: tg-bot-pair-fetcher
+  WORKER_SERVICE_NAME: tg-bot-pair-fetcher-worker
   REGION: ${{ secrets.REGION }}
   PROJECT_ID: ${{ secrets.PROJECT_ID }}
-  IMAGE: ${{ secrets.REGION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/scarce/tg-bot-pair-fetcher:${{ github.sha }}
+  IMAGE: ${{ secrets.REGION }}-docker.pkg.dev/${{ secrets.PROJECT_ID }}/scarce/tg-bot:${{ github.sha }}
 
 jobs:
-  deploy:
+  test:
+    name: Test and audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements.txt pip-audit
+
+      - name: Run tests
+        run: python -m unittest discover tests
+
+      - name: Audit dependencies
+        run: python -m pip_audit --requirement requirements.txt
+
+  build_and_push:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
         with:
           project_id: ${{ secrets.PROJECT_ID }}
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+
+      - name: Validate image reference
+        run: |
+          test -n "$IMAGE"
+          echo "Building image: $IMAGE"
 
       - name: Build Docker image
         run: docker build --tag "$IMAGE" .
@@ -38,18 +77,95 @@ jobs:
       - name: Push Docker image
         run: docker push "$IMAGE"
 
-      - name: Deploy to Cloud Run
+  deploy_webhook:
+    name: Deploy webhook
+    runs-on: ubuntu-latest
+    needs: build_and_push
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        with:
+          project_id: ${{ secrets.PROJECT_ID }}
+
+      - name: Validate image reference
+        run: |
+          test -n "$IMAGE"
+          echo "Deploying image: $IMAGE"
+
+      - name: Deploy Webhook to Cloud Run
         run: |
           gcloud run deploy "$SERVICE_NAME" \
             --image "$IMAGE" \
             --region "$REGION" \
             --platform managed \
             --allow-unauthenticated \
+            --update-env-vars SERVICE_ROLE=webhook \
+            --update-secrets TELEGRAM_BOT_TOKEN=tg-bot-telegram-token:latest,DATABASE_URL=tg-bot-database-url:latest,TELEGRAM_WEBHOOK_SECRET=tg-bot-webhook-secret:latest \
             --quiet
 
-      - name: Assert deployed image
+      - name: Assert deployed webhook image
         run: |
           deployed_image="$(gcloud run services describe "$SERVICE_NAME" \
+            --region "$REGION" \
+            --format='value(spec.template.spec.containers[0].image)')"
+
+          echo "Expected: $IMAGE"
+          echo "Deployed: $deployed_image"
+          test "$deployed_image" = "$IMAGE"
+
+  deploy_worker:
+    name: Deploy worker
+    runs-on: ubuntu-latest
+    needs: build_and_push
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        with:
+          project_id: ${{ secrets.PROJECT_ID }}
+
+      - name: Validate image reference
+        run: |
+          test -n "$IMAGE"
+          echo "Deploying image: $IMAGE"
+
+      - name: Deploy private worker to Cloud Run
+        run: |
+          gcloud run deploy "$WORKER_SERVICE_NAME" \
+            --image "$IMAGE" \
+            --region "$REGION" \
+            --platform managed \
+            --no-allow-unauthenticated \
+            --service-account "tg-bot-worker-runtime@${PROJECT_ID}.iam.gserviceaccount.com" \
+            --update-env-vars SERVICE_ROLE=worker \
+            --update-secrets TELEGRAM_BOT_TOKEN=tg-bot-telegram-token:latest,DATABASE_URL=tg-bot-database-url:latest \
+            --timeout 540s \
+            --concurrency 1 \
+            --max-instances 1 \
+            --quiet
+
+      - name: Assert deployed worker image
+        run: |
+          deployed_image="$(gcloud run services describe "$WORKER_SERVICE_NAME" \
             --region "$REGION" \
             --format='value(spec.template.spec.containers[0].image)')"
 

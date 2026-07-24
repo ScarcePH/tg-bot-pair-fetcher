@@ -33,10 +33,32 @@ def _validate_target_url(target_url: str) -> None:
     if (
         parsed.scheme != 'https'
         or not parsed.netloc
-        or not target_url.endswith('/tasks/fetch')
+        or parsed.path != '/tasks/fetch'
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
     ):
         raise ValueError(
             'CLOUD_TASKS_TARGET_URL must use HTTPS and end in /tasks/fetch'
+        )
+
+
+def _validate_oidc_audience(target_url: str, audience: str) -> None:
+    target = urlparse(target_url)
+    parsed = urlparse(audience)
+
+    if (
+        parsed.scheme != 'https'
+        or not parsed.netloc
+        or parsed.path not in ('', '/')
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or (parsed.scheme, parsed.netloc) != (target.scheme, target.netloc)
+    ):
+        raise ValueError(
+            'CLOUD_TASKS_OIDC_AUDIENCE must be the HTTPS base URL of '
+            'CLOUD_TASKS_TARGET_URL'
         )
 
 
@@ -48,25 +70,31 @@ class FetchTaskQueue:
         location: str,
         queue: str,
         target_url: str,
-        scheduler_secret: str,
+        oidc_service_account: str,
+        oidc_audience: str,
         client: Any | None = None,
     ) -> None:
         _validate_target_url(target_url)
+        _validate_oidc_audience(target_url, oidc_audience)
         self.project_id = project_id
         self.location = location
         self.queue = queue
         self.target_url = target_url
-        self.scheduler_secret = scheduler_secret
+        self.oidc_service_account = oidc_service_account
+        self.oidc_audience = oidc_audience.rstrip('/')
         self.client = client or tasks_v2.CloudTasksAsyncClient()
 
     @classmethod
-    def from_env(cls, *, scheduler_secret: str) -> FetchTaskQueue:
+    def from_env(cls) -> FetchTaskQueue:
         return cls(
             project_id=_require_env('CLOUD_TASKS_PROJECT_ID'),
             location=_require_env('CLOUD_TASKS_LOCATION'),
             queue=_require_env('CLOUD_TASKS_QUEUE'),
             target_url=_require_env('CLOUD_TASKS_TARGET_URL'),
-            scheduler_secret=scheduler_secret,
+            oidc_service_account=_require_env(
+                'CLOUD_TASKS_OIDC_SERVICE_ACCOUNT'
+            ),
+            oidc_audience=_require_env('CLOUD_TASKS_OIDC_AUDIENCE'),
         )
 
     @staticmethod
@@ -143,7 +171,10 @@ class FetchTaskQueue:
                 'url': self.target_url,
                 'headers': {
                     'Content-Type': 'application/json',
-                    'X-Scheduler-Secret': self.scheduler_secret,
+                },
+                'oidc_token': {
+                    'service_account_email': self.oidc_service_account,
+                    'audience': self.oidc_audience,
                 },
                 'body': json.dumps(
                     payload,

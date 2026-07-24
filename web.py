@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -17,6 +18,7 @@ from state import BotStateStore, SavedSearch
 
 
 logger = logging.getLogger(__name__)
+SERVICE_ROLES = frozenset({'webhook', 'worker'})
 
 
 def _is_nonempty_string(value: object) -> bool:
@@ -47,21 +49,24 @@ def _valid_fetch_task_payload(payload: object) -> bool:
     return False
 
 
-def _valid_secret(request: Request, header: str, expected: str) -> bool:
-    supplied = request.headers.get(header, '')
-    return bool(supplied) and hmac.compare_digest(supplied, expected)
+def _get_service_role(service_role: str | None) -> str:
+    role = (service_role or os.getenv('SERVICE_ROLE', '')).strip().lower()
+    if role not in SERVICE_ROLES:
+        raise ValueError('SERVICE_ROLE must be webhook or worker')
+    return role
 
 
 def create_app(
     telegram_application: Application | None = None,
     *,
+    service_role: str | None = None,
     webhook_secret: str | None = None,
-    scheduler_secret: str | None = None,
 ) -> Starlette:
     load_dotenv()
+    service_role = _get_service_role(service_role)
     telegram_application = telegram_application or build_application()
-    webhook_secret = webhook_secret or require_env('TELEGRAM_WEBHOOK_SECRET')
-    scheduler_secret = scheduler_secret or require_env('SCHEDULER_SECRET')
+    if service_role == 'webhook':
+        webhook_secret = webhook_secret or require_env('TELEGRAM_WEBHOOK_SECRET')
 
     @asynccontextmanager
     async def lifespan(_app: Starlette):
@@ -80,7 +85,14 @@ def create_app(
         return JSONResponse({'status': 'ok'})
 
     async def telegram_webhook(request: Request) -> JSONResponse:
-        if not _valid_secret(request, 'X-Telegram-Bot-Api-Secret-Token', webhook_secret):
+        supplied_secret = request.headers.get(
+            'X-Telegram-Bot-Api-Secret-Token',
+            '',
+        )
+        if not supplied_secret or not hmac.compare_digest(
+            supplied_secret,
+            webhook_secret,
+        ):
             return JSONResponse({'detail': 'unauthorized'}, status_code=401)
         try:
             payload = await request.json()
@@ -91,9 +103,6 @@ def create_app(
         return JSONResponse({'ok': True})
 
     async def scheduled_fetch(request: Request) -> JSONResponse:
-        if not _valid_secret(request, 'X-Scheduler-Secret', scheduler_secret):
-            return JSONResponse({'detail': 'unauthorized'}, status_code=401)
-
         job_name = request.headers.get('X-CloudScheduler-JobName', '').strip()
         schedule_time = request.headers.get(
             'X-CloudScheduler-ScheduleTime',
@@ -110,9 +119,6 @@ def create_app(
         return JSONResponse({'status': 'queued'}, status_code=202)
 
     async def fetch_task(request: Request) -> JSONResponse:
-        if not _valid_secret(request, 'X-Scheduler-Secret', scheduler_secret):
-            return JSONResponse({'detail': 'unauthorized'}, status_code=401)
-
         try:
             payload = await request.json()
         except (ValueError, TypeError):
@@ -156,13 +162,17 @@ def create_app(
         status = 'completed' if completed else 'already_running_or_failed'
         return JSONResponse({'status': status})
 
-    return Starlette(
-        routes=[
+    if service_role == 'webhook':
+        routes = [
             Route('/', root, methods=['GET']),
             Route('/healthz', healthz, methods=['GET']),
             Route('/telegram/webhook', telegram_webhook, methods=['POST']),
+        ]
+    else:
+        routes = [
+            Route('/healthz', healthz, methods=['GET']),
             Route('/scheduler/fetch', scheduled_fetch, methods=['POST']),
             Route('/tasks/fetch', fetch_task, methods=['POST']),
-        ],
-        lifespan=lifespan,
-    )
+        ]
+
+    return Starlette(routes=routes, lifespan=lifespan)
