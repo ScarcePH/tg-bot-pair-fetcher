@@ -252,11 +252,7 @@ async def is_allowed_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = str(update.effective_chat.id)
     configured_chat_id = str(context.application.bot_data['chat_id'])
 
-    if chat_id != configured_chat_id:
-        await context.bot.send_message(chat_id=chat_id, text='This bot is configured for another chat.')
-        return False
-
-    return True
+    return chat_id == configured_chat_id
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -352,6 +348,7 @@ def build_application() -> Application:
 
     token = require_env('TELEGRAM_BOT_TOKEN')
     chat_id = require_env('TELEGRAM_CHAT_ID')
+    result_chat_id = require_env('TELEGRAM_RESULT_CHAT_ID')
     marketplaces = get_configured_marketplaces()
     state_store = BotStateStore()
     state_store.initialize()
@@ -359,6 +356,7 @@ def build_application() -> Application:
 
     application = Application.builder().token(token).updater(None).build()
     application.bot_data['chat_id'] = chat_id
+    application.bot_data['result_chat_id'] = result_chat_id
     application.bot_data['state_store'] = state_store
     application.bot_data['fetch_task_queue'] = fetch_task_queue
     application.add_handler(CommandHandler('start', start_command))

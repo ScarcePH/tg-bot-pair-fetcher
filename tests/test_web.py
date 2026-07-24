@@ -25,6 +25,7 @@ class FakeTelegramApplication:
         self.state_store = SimpleNamespace(list_saved_searches=lambda: [])
         self.bot_data = {
             'chat_id': '123',
+            'result_chat_id': '-100456',
             'fetch_task_queue': self.fetch_task_queue,
             'state_store': self.state_store,
         }
@@ -253,6 +254,23 @@ class WebAppTest(unittest.TestCase):
         )
         run_sku_fetch.assert_not_awaited()
 
+    def test_batch_without_saved_searches_notifies_result_channel(self) -> None:
+        with TestClient(self.app) as client:
+            response = client.post(
+                '/tasks/fetch',
+                json={
+                    'kind': 'batch',
+                    'manual': True,
+                    'run_id': 'run-123',
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.telegram.bot.send_message.assert_awaited_once_with(
+            chat_id='-100456',
+            text='No saved SKUs. Use /set <sku> <name> first.',
+        )
+
     def test_retrying_batch_reuses_deterministic_child_identities(self) -> None:
         from state import SavedSearch
 
@@ -293,6 +311,7 @@ class WebAppTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {'status': 'completed'})
+        self.assertEqual(run_sku_fetch.await_args.args[1], '-100456')
         saved_search = run_sku_fetch.await_args.args[2]
         self.assertEqual((saved_search.sku, saved_search.name), ('sku-a', 'NAME A'))
 
