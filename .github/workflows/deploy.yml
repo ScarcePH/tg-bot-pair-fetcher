@@ -6,7 +6,7 @@ on:
       - security-fixes
 
 env:
-  SERVICE_NAME: tg-bot-webhook-runtime
+  SERVICE_NAME: tg-bot-pair-fetcher
   WORKER_SERVICE_NAME: tg-bot-pair-fetcher-worker
   REGION: ${{ secrets.REGION }}
   PROJECT_ID: ${{ secrets.PROJECT_ID }}
@@ -56,7 +56,7 @@ jobs:
             --region "$REGION" \
             --platform managed \
             --allow-unauthenticated \
-            --update-env-vars SERVICE_ROLE=frontend \
+            --update-env-vars SERVICE_ROLE=webhook \
             --update-secrets TELEGRAM_BOT_TOKEN=tg-bot-telegram-token:latest,DATABASE_URL=tg-bot-database-url:latest,TELEGRAM_WEBHOOK_SECRET=tg-bot-webhook-secret:latest \
             --quiet
 
