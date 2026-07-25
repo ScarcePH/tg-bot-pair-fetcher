@@ -72,8 +72,8 @@ class BotHelperTest(unittest.TestCase):
 
         self.assertIsNotNone(bounds)
         left, top, right, bottom = bounds
-        self.assertLessEqual(right - left, 358)
-        self.assertLessEqual(bottom - top, 358)
+        self.assertLessEqual(right - left, 480)
+        self.assertLessEqual(bottom - top, 480)
         self.assertLessEqual(abs((left + right) - 512), 1)
         self.assertLessEqual(abs((top + bottom) - 512), 1)
         return bounds
@@ -148,7 +148,7 @@ class BotHelperTest(unittest.TestCase):
                     self.encode_image(image)
                 )
                 bounds = self.assert_valid_padded_sticker(sticker_data)
-                self.assertEqual(max(bounds[2] - bounds[0], bounds[3] - bounds[1]), 358)
+                self.assertEqual(max(bounds[2] - bounds[0], bounds[3] - bounds[1]), 480)
 
     def test_sticker_conversion_supports_palette_transparency(self) -> None:
         image = Image.new('P', (100, 100), 0)
@@ -171,7 +171,7 @@ class BotHelperTest(unittest.TestCase):
         bounds = self.assert_valid_padded_sticker(
             convert_product_image_to_sticker(self.encode_image(image))
         )
-        self.assertEqual(bounds[3] - bounds[1], 358)
+        self.assertEqual(bounds[3] - bounds[1], 480)
         self.assertGreater(bounds[2] - bounds[0], 170)
 
     def test_sticker_conversion_rejects_invalid_sources(self) -> None:

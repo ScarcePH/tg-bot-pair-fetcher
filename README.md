@@ -126,7 +126,7 @@ The image URL must be an absolute HTTPS URL without embedded credentials. Its
 source image must already contain visible content and meaningful transparency;
 the bot does not remove baked-in backgrounds. Downloads have strict timeouts,
 HTTPS-only redirects, and a 10 MB limit. The visible alpha bounds are cropped,
-fit within 358×358 pixels, and centered on a 512×512 transparent canvas. If
+fit within 480×480 pixels, and centered on a 512×512 transparent canvas. If
 image preparation or sticker delivery fails, the bot logs the error and sends
 a compact text alert with the same buttons instead. It publishes nothing when
 there are no new finds, and only successfully delivered links are stored in
