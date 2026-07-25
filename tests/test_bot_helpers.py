@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 try:
     from bot import (
-        TELEGRAM_MESSAGE_LIMIT,
         build_application,
         fetch_command,
         filter_new_links,
@@ -21,7 +20,6 @@ try:
     from scraper import ScrapedLink
     from state import BotStateStore, SavedSearch, SeenLink
 except ModuleNotFoundError as exc:
-    TELEGRAM_MESSAGE_LIMIT = None
     build_application = None
     fetch_command = None
     filter_new_links = None
@@ -101,23 +99,22 @@ class BotHelperTest(unittest.TestCase):
         )
 
     def test_format_one_listing_as_compact_html_alert(self) -> None:
-        messages = format_scraped_links_for_telegram(
+        alerts = format_scraped_links_for_telegram(
             SavedSearch(sku='sku-a', name='HT BROWN'),
             [ScrapedLink('https://market.example/item/123', 'marketplace_a', 'sku-a')],
         )
 
+        self.assertEqual(len(alerts), 1)
         self.assertEqual(
-            messages,
-            [
-                '🔔 <b>NEW FIND</b>\n\n'
-                '<b>HT BROWN</b>\n'
-                '1 new listing\n\n'
-                '<a href="https://market.example/item/123">View listing 1</a>'
-            ],
+            alerts[0].text,
+            '🔔 <b>NEW FIND</b>\n\n<b>HT BROWN</b>\n1 new listing',
         )
+        button = alerts[0].reply_markup.inline_keyboard[0][0]
+        self.assertEqual(button.text, 'View listing ↗')
+        self.assertEqual(button.url, 'https://market.example/item/123')
 
     def test_format_multiple_listings_in_one_numbered_alert(self) -> None:
-        messages = format_scraped_links_for_telegram(
+        alerts = format_scraped_links_for_telegram(
             SavedSearch(sku='secret-sku', name='OG VENOM'),
             [
                 ScrapedLink('https://market.example/item/1', 'marketplace_a', 'secret-sku'),
@@ -125,14 +122,21 @@ class BotHelperTest(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(len(messages), 1)
-        self.assertIn('2 new listings', messages[0])
-        self.assertIn('View listing 1</a>\n<a ', messages[0])
-        self.assertIn('View listing 2</a>', messages[0])
-        self.assertNotIn('secret-sku', messages[0])
+        self.assertEqual(len(alerts), 1)
+        self.assertIn('2 new listings', alerts[0].text)
+        self.assertNotIn('secret-sku', alerts[0].text)
+        rows = alerts[0].reply_markup.inline_keyboard
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            [(row[0].text, row[0].url) for row in rows],
+            [
+                ('View listing 1 ↗', 'https://market.example/item/1'),
+                ('View listing 2 ↗', 'https://market.example/item/2'),
+            ],
+        )
 
-    def test_format_alert_escapes_html_sensitive_name_and_url(self) -> None:
-        messages = format_scraped_links_for_telegram(
+    def test_format_alert_escapes_name_and_preserves_exact_url(self) -> None:
+        alerts = format_scraped_links_for_telegram(
             SavedSearch(sku='sku-a', name='A & <B> "Special"'),
             [
                 ScrapedLink(
@@ -143,29 +147,46 @@ class BotHelperTest(unittest.TestCase):
             ],
         )
 
-        self.assertIn('<b>A &amp; &lt;B&gt; &quot;Special&quot;</b>', messages[0])
-        self.assertIn('a=1&amp;label=&quot;hot&quot;', messages[0])
+        self.assertIn(
+            '<b>A &amp; &lt;B&gt; &quot;Special&quot;</b>',
+            alerts[0].text,
+        )
+        self.assertEqual(
+            alerts[0].reply_markup.inline_keyboard[0][0].url,
+            'https://market.example/item/1?a=1&label="hot"',
+        )
 
     def test_large_alerts_split_with_repeated_header(self) -> None:
         links = [
             ScrapedLink(
-                f'https://market.example/item/{number}/' + 'x' * 120,
+                f'https://market.example/item/{number}',
                 'marketplace_a',
                 'sku-a',
             )
-            for number in range(1, 40)
+            for number in range(1, 24)
         ]
-        messages = format_scraped_links_for_telegram(
+        alerts = format_scraped_links_for_telegram(
             SavedSearch(sku='sku-a', name='LIMITED ITEM'),
             links,
         )
 
-        self.assertGreater(len(messages), 1)
-        self.assertTrue(all(len(message) <= TELEGRAM_MESSAGE_LIMIT for message in messages))
+        self.assertEqual(len(alerts), 3)
         self.assertTrue(
-            all(message.startswith('🔔 <b>NEW FIND</b>') for message in messages)
+            all(alert.text.startswith('🔔 <b>NEW FIND</b>') for alert in alerts)
         )
-        self.assertIn('View listing 39</a>', messages[-1])
+        self.assertTrue(all('23 new listings' in alert.text for alert in alerts))
+        self.assertEqual(
+            [len(alert.reply_markup.inline_keyboard) for alert in alerts],
+            [10, 10, 3],
+        )
+        self.assertEqual(
+            alerts[-1].reply_markup.inline_keyboard[-1][0].text,
+            'View listing 23 ↗',
+        )
+        self.assertEqual(
+            alerts[-1].reply_markup.inline_keyboard[-1][0].url,
+            'https://market.example/item/23',
+        )
 
     def test_run_fetch_reports_already_running_when_database_lock_is_unavailable(self) -> None:
         from bot import run_fetch
@@ -218,12 +239,16 @@ class BotHelperTest(unittest.TestCase):
             text=(
                 '🔔 <b>NEW FIND</b>\n\n'
                 '<b>NAME A</b>\n'
-                '1 new listing\n\n'
-                '<a href="https://market.example/item/new">View listing 1</a>'
+                '1 new listing'
             ),
             parse_mode='HTML',
             disable_web_page_preview=True,
+            reply_markup=application.bot.send_message.await_args.kwargs['reply_markup'],
         )
+        reply_markup = application.bot.send_message.await_args.kwargs['reply_markup']
+        button = reply_markup.inline_keyboard[0][0]
+        self.assertEqual(button.text, 'View listing ↗')
+        self.assertEqual(button.url, 'https://market.example/item/new')
         self.assertEqual(seen_urls, {'https://market.example/item/new'})
 
     def test_run_sku_fetch_reports_sku_specific_no_links(self) -> None:
@@ -288,15 +313,18 @@ class BotHelperTest(unittest.TestCase):
         import asyncio
         asyncio.run(run_test())
         self.assertEqual(seen_urls, {'https://market.example/item/new'})
-        messages = [
-            call.kwargs['text']
+        sent_messages = [
+            call.kwargs
             for call in application.bot.send_message.await_args_list
         ]
         self.assertEqual(
-            len(messages),
+            len(sent_messages),
             1,
         )
-        self.assertIn('View listing 1</a>', messages[0])
+        self.assertEqual(
+            sent_messages[0]['reply_markup'].inline_keyboard[0][0].url,
+            'https://market.example/item/new',
+        )
 
     def test_fetch_command_acknowledges_before_enqueuing_manual_fetch(self) -> None:
         events = []

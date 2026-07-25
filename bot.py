@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from html import escape
 from typing import Any
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -16,12 +17,19 @@ from state import BotStateStore, SavedSearch, SeenLink
 
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+MAX_LISTING_BUTTONS_PER_MESSAGE = 10
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TelegramAlert:
+    text: str
+    reply_markup: InlineKeyboardMarkup
 
 
 def require_env(name: str) -> str:
@@ -36,51 +44,57 @@ def require_env(name: str) -> str:
 def format_scraped_links_for_telegram(
     saved_search: SavedSearch,
     links: list[ScrapedLink],
-) -> list[str]:
-    """Build bounded, HTML-safe subscriber alerts for one saved search."""
+) -> list[TelegramAlert]:
+    """Build HTML-safe subscriber alerts with native listing buttons."""
     if not links:
         return []
 
     listing_label = 'listing' if len(links) == 1 else 'listings'
     header = (
         '🔔 <b>NEW FIND</b>\n\n'
-        f'<b>{escape(saved_search.name)}</b>\n'
+        f'<b>{escape(saved_search.name)}</b>\n\n'
         f'{len(links)} new {listing_label}'
     )
-    messages: list[str] = []
-    current_message = header
+    if len(header) > TELEGRAM_MESSAGE_LIMIT:
+        raise ValueError('A formatted alert exceeds the Telegram message limit')
 
-    for number, link in enumerate(links, start=1):
-        link_line = (
-            f'<a href="{escape(link.url, quote=True)}">'
-            f'View listing {number}</a>'
+    alerts: list[TelegramAlert] = []
+    multiple_listings = len(links) > 1
+    for offset in range(0, len(links), MAX_LISTING_BUTTONS_PER_MESSAGE):
+        rows: list[list[InlineKeyboardButton]] = []
+        for number, link in enumerate(
+            links[offset:offset + MAX_LISTING_BUTTONS_PER_MESSAGE],
+            start=offset + 1,
+        ):
+            label = (
+                f'View listing {number} ↗'
+                if multiple_listings
+                else 'View listing ↗'
+            )
+            rows.append([InlineKeyboardButton(label, url=link.url)])
+
+        alerts.append(
+            TelegramAlert(
+                text=header,
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
         )
-        separator = '\n\n' if current_message == header else '\n'
-        candidate = f'{current_message}{separator}{link_line}'
 
-        if len(candidate) <= TELEGRAM_MESSAGE_LIMIT:
-            current_message = candidate
-            continue
-
-        if current_message == header:
-            raise ValueError('A formatted listing exceeds the Telegram message limit')
-
-        messages.append(current_message)
-        current_message = f'{header}\n\n{link_line}'
-        if len(current_message) > TELEGRAM_MESSAGE_LIMIT:
-            raise ValueError('A formatted listing exceeds the Telegram message limit')
-
-    messages.append(current_message)
-    return messages
+    return alerts
 
 
-async def send_links(context: Any, chat_id: str, messages: list[str]) -> None:
-    for message in messages:
+async def send_links(
+    context: Any,
+    chat_id: str,
+    alerts: list[TelegramAlert],
+) -> None:
+    for alert in alerts:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=message,
+            text=alert.text,
             parse_mode='HTML',
             disable_web_page_preview=True,
+            reply_markup=alert.reply_markup,
         )
 
 

@@ -115,8 +115,9 @@ acknowledgement and any enqueue error, stay in the private chat.
 
 `TELEGRAM_RESULT_CHAT_ID` is a finds-only subscriber feed. Each manual or
 scheduled SKU task groups all new links for one saved search into a compact
-HTML alert with labeled links. It publishes nothing when there are no new
-finds. Links in `seen_links` are deduplicated across manual and scheduled runs.
+HTML alert with native Telegram URL buttons. It publishes nothing when there
+are no new finds. Links in `seen_links` are deduplicated across manual and
+scheduled runs.
 
 Scraping failures are sent only to the private control chat configured by
 `TELEGRAM_CHAT_ID`, with the saved name and SKU included for diagnosis. They
