@@ -138,12 +138,6 @@ def create_app(
             ]
             saved_searches = state_store.list_saved_searches()
 
-            if not saved_searches:
-                await telegram_application.bot.send_message(
-                    chat_id=result_chat_id,
-                    text='No saved SKUs. Use /set <sku> <name> first.',
-                )
-
             for saved_search in saved_searches:
                 await task_queue.enqueue_sku_fetch(
                     run_id=payload['run_id'],

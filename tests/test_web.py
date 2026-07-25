@@ -254,7 +254,7 @@ class WebAppTest(unittest.TestCase):
         )
         run_sku_fetch.assert_not_awaited()
 
-    def test_batch_without_saved_searches_notifies_result_channel(self) -> None:
+    def test_batch_without_saved_searches_keeps_result_channel_silent(self) -> None:
         with TestClient(self.app) as client:
             response = client.post(
                 '/tasks/fetch',
@@ -266,10 +266,7 @@ class WebAppTest(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.telegram.bot.send_message.assert_awaited_once_with(
-            chat_id='-100456',
-            text='No saved SKUs. Use /set <sku> <name> first.',
-        )
+        self.telegram.bot.send_message.assert_not_awaited()
 
     def test_retrying_batch_reuses_deterministic_child_identities(self) -> None:
         from state import SavedSearch

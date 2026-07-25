@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from html import escape
 from typing import Any
 
 from dotenv import load_dotenv
@@ -32,52 +33,53 @@ def require_env(name: str) -> str:
     return value
 
 
-def split_links_for_telegram(links: list[str]) -> list[str]:
-    messages = []
-    current_lines = []
-    current_length = 0
+def format_scraped_links_for_telegram(
+    saved_search: SavedSearch,
+    links: list[ScrapedLink],
+) -> list[str]:
+    """Build bounded, HTML-safe subscriber alerts for one saved search."""
+    if not links:
+        return []
 
-    for link in links:
-        line_length = len(link)
-        separator_length = 1 if current_lines else 0
+    listing_label = 'listing' if len(links) == 1 else 'listings'
+    header = (
+        '🔔 <b>NEW FIND</b>\n\n'
+        f'<b>{escape(saved_search.name)}</b>\n'
+        f'{len(links)} new {listing_label}'
+    )
+    messages: list[str] = []
+    current_message = header
 
-        if current_lines and current_length + separator_length + line_length > TELEGRAM_MESSAGE_LIMIT:
-            messages.append('\n'.join(current_lines))
-            current_lines = [link]
-            current_length = line_length
-        else:
-            current_lines.append(link)
-            current_length += separator_length + line_length
+    for number, link in enumerate(links, start=1):
+        link_line = (
+            f'<a href="{escape(link.url, quote=True)}">'
+            f'View listing {number}</a>'
+        )
+        separator = '\n\n' if current_message == header else '\n'
+        candidate = f'{current_message}{separator}{link_line}'
 
-    if current_lines:
-        messages.append('\n'.join(current_lines))
+        if len(candidate) <= TELEGRAM_MESSAGE_LIMIT:
+            current_message = candidate
+            continue
 
+        if current_message == header:
+            raise ValueError('A formatted listing exceeds the Telegram message limit')
+
+        messages.append(current_message)
+        current_message = f'{header}\n\n{link_line}'
+        if len(current_message) > TELEGRAM_MESSAGE_LIMIT:
+            raise ValueError('A formatted listing exceeds the Telegram message limit')
+
+    messages.append(current_message)
     return messages
 
 
-def format_scraped_links_for_telegram(
-    links: list[ScrapedLink],
-    saved_searches: list[SavedSearch],
-) -> list[str]:
-    saved_names_by_sku = {search.sku: search.name for search in saved_searches}
-    formatted_links = []
-
-    for link in links:
-        saved_name = saved_names_by_sku.get(link.query)
-
-        if saved_name:
-            formatted_links.append(f'{saved_name} - {link.url}')
-        else:
-            formatted_links.append(link.url)
-
-    return formatted_links
-
-
-async def send_links(context: Any, chat_id: str, links: list[str]) -> None:
-    for message in split_links_for_telegram(links):
+async def send_links(context: Any, chat_id: str, messages: list[str]) -> None:
+    for message in messages:
         await context.bot.send_message(
             chat_id=chat_id,
             text=message,
+            parse_mode='HTML',
             disable_web_page_preview=True,
         )
 
@@ -93,50 +95,50 @@ async def run_fetch(
 ) -> bool:
     """Run the legacy all-SKU fetch path used by the standalone bot API."""
     state_store: BotStateStore = get_bot_data(context)['state_store']
+    control_chat_id = str(get_bot_data(context)['chat_id'])
     with state_store.fetch_lock() as lock_acquired:
         if not lock_acquired:
-            await context.bot.send_message(chat_id=chat_id, text='A fetch is already running.')
             logger.info('Skipped fetch because another fetch is already running')
             return False
 
-        try:
-            saved_searches = state_store.list_saved_searches()
+        saved_searches = state_store.list_saved_searches()
+        completed = True
 
-            if not saved_searches:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text='No saved SKUs. Use /set <sku> <name> first.',
+        for saved_search in saved_searches:
+            try:
+                scraped_links = await scrape_link_results(
+                    item_queries=[saved_search.sku],
+                    raise_on_error=True,
                 )
-                return True
-
-            scraped_links = await scrape_link_results(
-                item_queries=[search.sku for search in saved_searches],
-            )
-            new_links = filter_new_links(state_store, scraped_links)
-
-            if new_links:
+                new_links = filter_new_links(state_store, scraped_links)
                 await send_links(
                     context,
                     chat_id,
-                    format_scraped_links_for_telegram(new_links, saved_searches),
+                    format_scraped_links_for_telegram(saved_search, new_links),
                 )
-                state_store.record_seen_links(
-                    [
-                        SeenLink(
-                            url=link.url,
-                            marketplace_key=link.marketplace_key,
-                            query=link.query,
-                        )
-                        for link in new_links
-                    ]
+                if new_links:
+                    state_store.record_seen_links(
+                        [
+                            SeenLink(
+                                url=link.url,
+                                marketplace_key=link.marketplace_key,
+                                query=link.query,
+                            )
+                            for link in new_links
+                        ]
+                    )
+            except Exception:
+                completed = False
+                logger.exception('Fetch failed for SKU %s', saved_search.sku)
+                await context.bot.send_message(
+                    chat_id=control_chat_id,
+                    text=(
+                        f'Fetch failed for {saved_search.name} '
+                        f'({saved_search.sku}). Check bot logs.'
+                    ),
                 )
 
-            await context.bot.send_message(chat_id=chat_id, text='No new links found')
-        except Exception:
-            logger.exception('Fetch failed')
-            await context.bot.send_message(chat_id=chat_id, text='Fetch failed. Check bot logs.')
-            return False
-    return True
+    return completed
 
 
 async def run_sku_fetch(
@@ -145,6 +147,7 @@ async def run_sku_fetch(
     saved_search: SavedSearch,
 ) -> bool:
     state_store: BotStateStore = get_bot_data(context)['state_store']
+    control_chat_id = str(get_bot_data(context)['chat_id'])
     label = f'{saved_search.name} ({saved_search.sku})'
 
     with state_store.fetch_lock() as lock_acquired:
@@ -167,8 +170,8 @@ async def run_sku_fetch(
                     context,
                     chat_id,
                     format_scraped_links_for_telegram(
+                        saved_search,
                         new_links,
-                        [saved_search],
                     ),
                 )
                 state_store.record_seen_links(
@@ -181,15 +184,10 @@ async def run_sku_fetch(
                         for link in new_links
                     ]
                 )
-            else:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f'No new links found for {label}.',
-                )
         except Exception:
             logger.exception('Fetch failed for SKU %s', saved_search.sku)
             await context.bot.send_message(
-                chat_id=chat_id,
+                chat_id=control_chat_id,
                 text=f'Fetch failed for {label}. Check bot logs.',
             )
             return False

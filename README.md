@@ -45,7 +45,7 @@ Private worker /tasks/fetch
     ├── acquires the Postgres advisory lock
     ├── scrapes the configured marketplaces for one SKU
     ├── records new links in Postgres
-    └── sends the SKU result to the Telegram result channel
+    └── sends new finds to the Telegram result channel
 ```
 
 
@@ -113,10 +113,15 @@ acknowledgement and any enqueue error, stay in the private chat.
 - `/unset <sku>` — remove a SKU and refresh the pinned list.
 - `/fetch` — acknowledge immediately and enqueue all saved SKUs.
 
-Each manual or scheduled SKU task sends new links, a no-results message, or a
-concise failure message to `TELEGRAM_RESULT_CHAT_ID`. A batch with no saved
-SKUs also reports that outcome to the result channel. Links in `seen_links` are
-deduplicated across manual and scheduled runs.
+`TELEGRAM_RESULT_CHAT_ID` is a finds-only subscriber feed. Each manual or
+scheduled SKU task groups all new links for one saved search into a compact
+HTML alert with labeled links. It publishes nothing when there are no new
+finds. Links in `seen_links` are deduplicated across manual and scheduled runs.
+
+Scraping failures are sent only to the private control chat configured by
+`TELEGRAM_CHAT_ID`, with the saved name and SKU included for diagnosis. They
+are also written to the application logs. A batch with no saved SKUs produces
+no result-channel post.
 
 ## Configuration
 
@@ -128,8 +133,8 @@ the common settings below.
 | --- | --- | --- | --- |
 | `SERVICE_ROLE` | `webhook` | `worker` | Registers only that role's routes. |
 | `TELEGRAM_BOT_TOKEN` | Required | Required | Receive commands and send results. |
-| `TELEGRAM_CHAT_ID` | Required | Required | Private control chat; restrict commands and receive command replies. |
-| `TELEGRAM_RESULT_CHAT_ID` | Required | Required | Channel that receives manual and scheduled fetch outcomes. |
+| `TELEGRAM_CHAT_ID` | Required | Required | Private control chat; restrict commands and receive command replies and scraping failures. |
+| `TELEGRAM_RESULT_CHAT_ID` | Required | Required | Finds-only channel that receives new listings from manual and scheduled fetches. |
 | `DATABASE_URL` | Required | Required | Store searches, seen links, and chat state. |
 | `TELEGRAM_WEBHOOK_SECRET` | Required | Not used | Validate Telegram webhook requests. |
 | `CLOUD_TASKS_PROJECT_ID` | Required | Required | Queue project. |
