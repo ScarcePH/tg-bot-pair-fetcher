@@ -33,15 +33,56 @@ class BotStateStoreTest(unittest.TestCase):
                 cursor.execute('TRUNCATE chat_state, seen_links, saved_searches')
 
     def test_upsert_list_and_delete_saved_search(self) -> None:
-        self.store.upsert_saved_search('b-sku', 'Second')
-        self.store.upsert_saved_search('A-sku', 'First')
-        self.store.upsert_saved_search('A-sku', 'First updated')
+        self.store.upsert_saved_search('b-sku', 'Second', None)
+        self.store.upsert_saved_search(
+            'A-sku',
+            'First',
+            'https://images.example/first.jpg',
+        )
+        self.store.upsert_saved_search(
+            'A-sku',
+            'First updated',
+            'https://images.example/updated.jpg',
+        )
         self.assertEqual(
             self.store.list_saved_searches(),
-            [SavedSearch('A-sku', 'First updated'), SavedSearch('b-sku', 'Second')],
+            [
+                SavedSearch(
+                    'A-sku',
+                    'First updated',
+                    'https://images.example/updated.jpg',
+                ),
+                SavedSearch('b-sku', 'Second'),
+            ],
         )
         self.assertTrue(self.store.delete_saved_search('A-sku'))
         self.assertFalse(self.store.delete_saved_search('A-sku'))
+
+    def test_initialize_adds_nullable_image_url_to_existing_table(self) -> None:
+        with self.store._connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute('DROP TABLE saved_searches')
+                cursor.execute(
+                    """
+                    CREATE TABLE saved_searches (
+                        sku TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                cursor.execute(
+                    'INSERT INTO saved_searches (sku, name) VALUES (%s, %s)',
+                    ('legacy-sku', 'Legacy'),
+                )
+
+        self.store.initialize()
+
+        self.assertEqual(
+            self.store.list_saved_searches(),
+            [SavedSearch('legacy-sku', 'Legacy')],
+        )
 
     def test_seen_links_are_recorded_once(self) -> None:
         link = SeenLink('https://market.example/item/1', 'marketplace_a', 'sku')

@@ -214,7 +214,11 @@ class WebAppTest(unittest.TestCase):
         from state import SavedSearch
 
         self.telegram.state_store.list_saved_searches = lambda: [
-            SavedSearch(sku='sku-a', name='NAME A'),
+            SavedSearch(
+                sku='sku-a',
+                name='NAME A',
+                image_url='https://images.example/a.jpg',
+            ),
             SavedSearch(sku='sku-b', name='NAME B'),
         ]
 
@@ -243,12 +247,14 @@ class WebAppTest(unittest.TestCase):
                     'manual': True,
                     'sku': 'sku-a',
                     'name': 'NAME A',
+                    'image_url': 'https://images.example/a.jpg',
                 },
                 {
                     'run_id': 'run-123',
                     'manual': True,
                     'sku': 'sku-b',
                     'name': 'NAME B',
+                    'image_url': None,
                 },
             ],
         )
@@ -303,6 +309,7 @@ class WebAppTest(unittest.TestCase):
                         'run_id': 'run-123',
                         'sku': 'sku-a',
                         'name': 'NAME A',
+                        'image_url': 'https://images.example/a.jpg',
                     },
                 )
 
@@ -310,7 +317,49 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(response.json(), {'status': 'completed'})
         self.assertEqual(run_sku_fetch.await_args.args[1], '-100456')
         saved_search = run_sku_fetch.await_args.args[2]
-        self.assertEqual((saved_search.sku, saved_search.name), ('sku-a', 'NAME A'))
+        self.assertEqual(
+            (saved_search.sku, saved_search.name, saved_search.image_url),
+            ('sku-a', 'NAME A', 'https://images.example/a.jpg'),
+        )
+
+    def test_legacy_sku_task_without_image_url_is_accepted(self) -> None:
+        with patch(
+            'web.run_sku_fetch',
+            new=AsyncMock(return_value=True),
+        ) as run_sku_fetch:
+            with TestClient(self.app) as client:
+                response = client.post(
+                    '/tasks/fetch',
+                    json={
+                        'kind': 'sku',
+                        'manual': False,
+                        'run_id': 'run-legacy',
+                        'sku': 'sku-a',
+                        'name': 'NAME A',
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        saved_search = run_sku_fetch.await_args.args[2]
+        self.assertIsNone(saved_search.image_url)
+
+    def test_worker_rejects_non_string_image_url(self) -> None:
+        with patch('web.run_sku_fetch', new=AsyncMock()) as run_sku_fetch:
+            with TestClient(self.app) as client:
+                response = client.post(
+                    '/tasks/fetch',
+                    json={
+                        'kind': 'sku',
+                        'manual': False,
+                        'run_id': 'run-123',
+                        'sku': 'sku-a',
+                        'name': 'NAME A',
+                        'image_url': 123,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 400)
+        run_sku_fetch.assert_not_awaited()
 
     def test_worker_rejects_empty_payload(self) -> None:
         with patch('web.run_sku_fetch', new=AsyncMock()) as run_sku_fetch:

@@ -145,6 +145,7 @@ class FetchTaskQueue:
         manual: bool,
         sku: str,
         name: str,
+        image_url: str | None,
     ) -> None:
         await self._enqueue(
             task_id=self.sku_task_id(run_id, sku),
@@ -154,6 +155,7 @@ class FetchTaskQueue:
                 'run_id': run_id,
                 'sku': sku,
                 'name': name,
+                'image_url': image_url,
             },
         )
 

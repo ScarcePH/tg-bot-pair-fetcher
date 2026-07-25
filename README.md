@@ -44,8 +44,8 @@ Cloud Tasks queue (tg-bot-fetch)
 Private worker /tasks/fetch
     ├── acquires the Postgres advisory lock
     ├── scrapes the configured marketplaces for one SKU
-    ├── records new links in Postgres
-    └── sends new finds to the Telegram result channel
+    ├── sends new finds to the Telegram result channel
+    └── records successfully delivered links in Postgres
 ```
 
 
@@ -108,16 +108,29 @@ silently ignored. Command replies, including the immediate `/fetch`
 acknowledgement and any enqueue error, stay in the private chat.
 
 - `/start` — show help.
-- `/set <sku> <name>` — save or rename a SKU and refresh the pinned list.
+- `/set <sku> <image_url> <name>` — save or update a SKU, its HTTPS image URL,
+  and its name, then refresh the pinned list. Names may contain spaces.
 - `/list` — list saved SKU searches.
 - `/unset <sku>` — remove a SKU and refresh the pinned list.
 - `/fetch` — acknowledge immediately and enqueue all saved SKUs.
 
 `TELEGRAM_RESULT_CHAT_ID` is a finds-only subscriber feed. Each manual or
 scheduled SKU task groups all new links for one saved search into a compact
-HTML alert with native Telegram URL buttons. It publishes nothing when there
-are no new finds. Links in `seen_links` are deduplicated across manual and
-scheduled runs.
+two-message presentation: an HTML product name followed by a transparent,
+padded WebP sticker carrying the Telegram URL buttons. One result uses
+`View Listing`; multiple results use numbered buttons, with at most 10 buttons
+per sticker. The bot downloads and converts the image once per result batch,
+even when the buttons require several stickers.
+
+The image URL must be an absolute HTTPS URL without embedded credentials. Its
+source image must already contain visible content and meaningful transparency;
+the bot does not remove baked-in backgrounds. Downloads have strict timeouts,
+HTTPS-only redirects, and a 10 MB limit. The visible alpha bounds are cropped,
+fit within 358×358 pixels, and centered on a 512×512 transparent canvas. If
+image preparation or sticker delivery fails, the bot logs the error and sends
+a compact text alert with the same buttons instead. It publishes nothing when
+there are no new finds, and only successfully delivered links are stored in
+`seen_links` for deduplication across manual and scheduled runs.
 
 Scraping failures are sent only to the private control chat configured by
 `TELEGRAM_CHAT_ID`, with the saved name and SKU included for diagnosis. They
@@ -185,8 +198,9 @@ do not hardcode or commit them. Because both roles initialize the shared
 application, set `TELEGRAM_RESULT_CHAT_ID` on both the webhook and worker
 services before deploying code that requires it.
 
-The database account must be able to create `saved_searches`, `seen_links`, and
-`chat_state`; startup creates them automatically.
+The database account must be able to create and alter `saved_searches` and to
+create `seen_links` and `chat_state`. Startup creates the tables automatically
+and adds the nullable `saved_searches.image_url` column to existing databases.
 
 ## Run locally
 
@@ -208,6 +222,13 @@ The standalone scraper reads saved SKUs from Postgres:
 
 ```sh
 python scraper.py
+```
+
+To preview the exact product-name and sticker presentation in the configured
+result chat (including its light and dark chat-background appearance), run:
+
+```sh
+python preview_message.py
 ```
 
 ## Deploy and operate
