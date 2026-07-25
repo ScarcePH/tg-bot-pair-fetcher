@@ -15,6 +15,7 @@ FETCH_ADVISORY_LOCK_ID = 7_241_835_190_431
 class SavedSearch:
     sku: str
     name: str
+    image_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,9 @@ class BotStateStore:
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                     );
 
+                    ALTER TABLE saved_searches
+                    ADD COLUMN IF NOT EXISTS image_url TEXT;
+
                     CREATE TABLE IF NOT EXISTS seen_links (
                         url TEXT PRIMARY KEY,
                         marketplace_key TEXT,
@@ -62,9 +66,15 @@ class BotStateStore:
                     """
                 )
 
-    def upsert_saved_search(self, sku: str, name: str) -> SavedSearch:
+    def upsert_saved_search(
+        self,
+        sku: str,
+        name: str,
+        image_url: str | None,
+    ) -> SavedSearch:
         sku = sku.strip()
         name = name.strip()
+        image_url = image_url.strip() if image_url is not None else None
         if not sku:
             raise ValueError('SKU is required')
         if not name:
@@ -74,22 +84,29 @@ class BotStateStore:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO saved_searches (sku, name)
-                    VALUES (%s, %s)
+                    INSERT INTO saved_searches (sku, name, image_url)
+                    VALUES (%s, %s, %s)
                     ON CONFLICT(sku) DO UPDATE SET
                         name = EXCLUDED.name,
+                        image_url = EXCLUDED.image_url,
                         updated_at = CURRENT_TIMESTAMP
                     """,
-                    (sku, name),
+                    (sku, name, image_url),
                 )
-        return SavedSearch(sku=sku, name=name)
+        return SavedSearch(sku=sku, name=name, image_url=image_url)
 
     def list_saved_searches(self) -> list[SavedSearch]:
         with self._connect() as connection:
             with connection.cursor() as cursor:
-                cursor.execute('SELECT sku, name FROM saved_searches ORDER BY LOWER(sku), sku')
+                cursor.execute(
+                    'SELECT sku, name, image_url FROM saved_searches '
+                    'ORDER BY LOWER(sku), sku'
+                )
                 rows = cursor.fetchall()
-        return [SavedSearch(sku=row[0], name=row[1]) for row in rows]
+        return [
+            SavedSearch(sku=row[0], name=row[1], image_url=row[2])
+            for row in rows
+        ]
 
     def delete_saved_search(self, sku: str) -> bool:
         with self._connect() as connection:

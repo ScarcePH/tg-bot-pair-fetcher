@@ -3,5 +3,16 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /gcloud/application_default_credentials.json
+      PORT: "8080"
+      SERVICE_ROLE: webhook
+    volumes:
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/gcloud/application_default_credentials.json:ro
     ports:
       - "8080:8080"
+  tests:
+    build: .
+    command: python -m unittest discover -s tests -p "test_*.py" -v
+    environment:
+      SERVICE_ROLE: webhook

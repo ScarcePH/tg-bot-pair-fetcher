@@ -40,10 +40,14 @@ def _valid_fetch_task_payload(payload: object) -> bool:
         return set(payload) == {'kind', 'manual', 'run_id'}
 
     if payload.get('kind') == 'sku':
+        required_fields = {'kind', 'manual', 'run_id', 'sku', 'name'}
+        allowed_fields = required_fields | {'image_url'}
+        image_url = payload.get('image_url')
         return (
-            set(payload) == {'kind', 'manual', 'run_id', 'sku', 'name'}
+            required_fields <= set(payload) <= allowed_fields
             and _is_nonempty_string(payload.get('sku'))
             and _is_nonempty_string(payload.get('name'))
+            and (image_url is None or _is_nonempty_string(image_url))
         )
 
     return False
@@ -144,6 +148,7 @@ def create_app(
                     manual=payload['manual'],
                     sku=saved_search.sku,
                     name=saved_search.name,
+                    image_url=saved_search.image_url,
                 )
 
             return JSONResponse(
@@ -153,7 +158,11 @@ def create_app(
         completed = await run_sku_fetch(
             telegram_application,
             result_chat_id,
-            SavedSearch(sku=payload['sku'], name=payload['name']),
+            SavedSearch(
+                sku=payload['sku'],
+                name=payload['name'],
+                image_url=payload.get('image_url'),
+            ),
         )
         status = 'completed' if completed else 'already_running_or_failed'
         return JSONResponse({'status': status})

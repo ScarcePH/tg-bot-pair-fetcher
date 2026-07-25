@@ -236,6 +236,7 @@ class FetchTaskQueueTest(unittest.IsolatedAsyncioTestCase):
             manual=True,
             sku='833603-012',
             name='HT BROWN',
+            image_url='https://images.example/ht-brown.jpg',
         )
 
         expected_hash = hashlib.sha256(
@@ -249,7 +250,8 @@ class FetchTaskQueueTest(unittest.IsolatedAsyncioTestCase):
             task['http_request']['body'],
             (
                 b'{"kind":"sku","manual":true,"run_id":"run-123",'
-                b'"sku":"833603-012","name":"HT BROWN"}'
+                b'"sku":"833603-012","name":"HT BROWN",'
+                b'"image_url":"https://images.example/ht-brown.jpg"}'
             ),
         )
         self.assertEqual(task['dispatch_deadline'].seconds, 600)
@@ -270,6 +272,7 @@ class FetchTaskQueueTest(unittest.IsolatedAsyncioTestCase):
                 manual=False,
                 sku='833603-012',
                 name='HT BROWN',
+                image_url=None,
             )
 
         task_names = [
