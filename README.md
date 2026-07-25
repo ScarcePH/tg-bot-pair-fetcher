@@ -274,6 +274,9 @@ requests because the service has no polling loop or in-process timer.
 ```sh
 python -m unittest discover tests
 ```
+```sh
+docker-compose run --rm --build tests
+```
 
 Postgres integration tests require a disposable database and truncate the bot
 tables:
