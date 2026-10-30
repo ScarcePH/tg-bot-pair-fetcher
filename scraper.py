@@ -185,18 +185,56 @@ def extract_marketplace_links_from_page(
 ) -> list[str]:
     links = []
     seen = set()
+    anchor_count = 0
+    normalized_count = 0
+    host_match_count = 0
+    path_match_count = 0
+    allowed_hosts = {
+        host.lower().removeprefix('www.')
+        for host in marketplace.item_hosts
+    }
 
     for href in page.css('a::attr(href)').getall():
+        anchor_count += 1
         normalized_link = normalize_link(str(href), page_url)
 
-        if not normalized_link or not is_marketplace_item_link(normalized_link, marketplace):
+        if not normalized_link:
             continue
+
+        normalized_count += 1
+        parsed_url = urlparse(normalized_link)
+        normalized_host = parsed_url.netloc.lower().removeprefix('www.')
+
+        if normalized_host not in allowed_hosts:
+            continue
+
+        host_match_count += 1
+
+        if not any(
+            marker in parsed_url.path
+            for marker in marketplace.item_path_markers
+        ):
+            continue
+
+        path_match_count += 1
 
         if normalized_link in seen:
             continue
 
         seen.add(normalized_link)
         links.append(normalized_link)
+
+    logger.info(
+        'Marketplace link extraction for %s: anchors=%d normalized=%d '
+        'allowed_host=%d allowed_path=%d unique_items=%d sample_paths=%s',
+        marketplace.key,
+        anchor_count,
+        normalized_count,
+        host_match_count,
+        path_match_count,
+        len(links),
+        [urlparse(link).path for link in links[:5]],
+    )
 
     return links
 

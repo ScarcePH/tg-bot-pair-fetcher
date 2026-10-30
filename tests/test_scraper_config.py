@@ -104,6 +104,27 @@ class ScraperConfigTest(unittest.TestCase):
             ],
         )
 
+    def test_extraction_logs_link_filter_counts(self) -> None:
+        marketplace = self.build_test_marketplace('market_a')
+        html = '''
+            <a href="/item/123">item</a>
+            <a href="/search?q=sku">search</a>
+            <a href="https://other.example/item/456">other host</a>
+        '''
+
+        with self.assertLogs(scraper.logger, level='INFO') as captured:
+            links = extract_marketplace_links(
+                html,
+                'https://market.example/search?q=sku',
+                marketplace,
+            )
+
+        self.assertEqual(links, ['https://market.example/item/123'])
+        self.assertIn(
+            'anchors=3 normalized=3 allowed_host=2 allowed_path=1 unique_items=1',
+            captured.output[0],
+        )
+
     def test_scrape_delay_defaults_to_2000_ms(self) -> None:
         os.environ.pop('SCRAPER_SCRAPE_DELAY_MS', None)
 

@@ -134,7 +134,9 @@ there are no new finds, and only successfully delivered links are stored in
 
 Scraping failures are sent only to the private control chat configured by
 `TELEGRAM_CHAT_ID`, with the saved name and SKU included for diagnosis. They
-are also written to the application logs. A batch with no saved SKUs produces
+are also written to the application logs. The logs include per-search counts
+for extracted anchors, allowed hosts and paths, plus up to five matched item
+paths to help diagnose missing listings. A batch with no saved SKUs produces
 no result-channel post.
 
 ## Configuration
