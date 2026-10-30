@@ -226,14 +226,14 @@ def extract_marketplace_links_from_page(
 
     logger.info(
         'Marketplace link extraction for %s: anchors=%d normalized=%d '
-        'allowed_host=%d allowed_path=%d unique_items=%d sample_paths=%s',
+        'allowed_host=%d allowed_path=%d unique_items=%d sample_urls=%s',
         marketplace.key,
         anchor_count,
         normalized_count,
         host_match_count,
         path_match_count,
         len(links),
-        [urlparse(link).path for link in links[:5]],
+        links[:5],
     )
 
     return links

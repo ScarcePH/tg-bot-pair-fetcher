@@ -221,12 +221,17 @@ async def prepare_product_sticker(image_url: str) -> bytes:
 
 
 async def send_text_alert(context: Any, chat_id: str, alert: TelegramAlert) -> None:
-    await context.bot.send_message(
+    message = await context.bot.send_message(
         chat_id=chat_id,
         text=alert.text,
         parse_mode='HTML',
         disable_web_page_preview=True,
         reply_markup=alert.reply_markup,
+    )
+    logger.info(
+        'Telegram text alert delivered: chat_id=%s message_id=%s',
+        chat_id,
+        getattr(message, 'message_id', None),
     )
 
 
@@ -254,17 +259,27 @@ async def send_links(
                
                 sticker_file = BytesIO(sticker_data)
                 sticker_file.name = 'product.webp'
-                await context.bot.send_sticker(
+                sticker = await context.bot.send_sticker(
                     chat_id=chat_id,
                     sticker=sticker_file,
                 )
-                await context.bot.send_message(
+                logger.info(
+                    'Telegram sticker delivered: chat_id=%s message_id=%s',
+                    chat_id,
+                    getattr(sticker, 'message_id', None),
+                )
+                message = await context.bot.send_message(
                     chat_id=chat_id,
                     text=alert.text,
                     parse_mode='HTML',
                     disable_web_page_preview=True,
                     reply_markup=alert.reply_markup,
 
+                )
+                logger.info(
+                    'Telegram text alert delivered: chat_id=%s message_id=%s',
+                    chat_id,
+                    getattr(message, 'message_id', None),
                 )
                 continue
             except TelegramError:
@@ -355,6 +370,12 @@ async def run_sku_fetch(
                 raise_on_error=True,
             )
             new_links = filter_new_links(state_store, scraped_links)
+            logger.info(
+                'SKU fetch link counts for %s: scraped=%d new=%d',
+                saved_search.sku,
+                len(scraped_links),
+                len(new_links),
+            )
 
             if new_links:
                 await send_links(
@@ -391,15 +412,35 @@ def filter_new_links(
     scraped_links: list[ScrapedLink],
 ) -> list[ScrapedLink]:
     new_links = []
+    previously_seen_links = []
     seen_this_fetch = set()
+    duplicate_in_fetch_count = 0
+    previously_seen_count = 0
 
     for link in scraped_links:
-        if link.url in seen_this_fetch or state_store.has_seen_link(link.url):
+        if link.url in seen_this_fetch:
+            duplicate_in_fetch_count += 1
             continue
 
         seen_this_fetch.add(link.url)
+
+        if state_store.has_seen_link(link.url):
+            previously_seen_count += 1
+            previously_seen_links.append(link)
+            continue
+
         new_links.append(link)
 
+    logger.info(
+        'Link filtering: scraped=%d new=%d previously_seen=%d '
+        'duplicate_in_fetch=%d new_urls=%s previously_seen_urls=%s',
+        len(scraped_links),
+        len(new_links),
+        previously_seen_count,
+        duplicate_in_fetch_count,
+        [link.url for link in new_links[:5]],
+        [link.url for link in previously_seen_links[:5]],
+    )
     return new_links
 
 
