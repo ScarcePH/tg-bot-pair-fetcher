@@ -42,6 +42,21 @@ class ScrapedLink:
     query: str
 
 
+class ScrapeBatchError(RuntimeError):
+    def __init__(
+        self,
+        links: list[ScrapedLink],
+        failed_attempts: list[tuple[str, str]],
+    ) -> None:
+        self.links = links
+        self.failed_attempts = tuple(failed_attempts)
+        failed_labels = ', '.join(
+            f'{marketplace_key}/{query}'
+            for marketplace_key, query in failed_attempts
+        )
+        super().__init__(f'Scrape failed for: {failed_labels}')
+
+
 class LinkSelectable(Protocol):
     def css(self, query: str):
         ...
@@ -371,11 +386,10 @@ async def scrape_link_results(
                         await asyncio.sleep(scrape_delay_ms / 1000)
 
     if failed_attempts and raise_on_error:
-        failed_labels = ', '.join(
-            f'{marketplace_key}/{query}'
-            for marketplace_key, query in failed_attempts
+        raise ScrapeBatchError(
+            links=found_links,
+            failed_attempts=failed_attempts,
         )
-        raise RuntimeError(f'Scrape failed for: {failed_labels}')
 
     return found_links
 

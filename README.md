@@ -134,12 +134,14 @@ there are no new finds, and only successfully delivered links are stored in
 
 Scraping failures are sent only to the private control chat configured by
 `TELEGRAM_CHAT_ID`, with the saved name and SKU included for diagnosis. They
-are also written to the application logs. The logs include per-search counts
-for extracted anchors, allowed hosts and paths, plus up to five complete item
-URLs to help diagnose missing listings. They also report deduplication counts
-and up to five new or previously seen URLs, along with Telegram-accepted
-message IDs and destination chat IDs. A batch with no saved SKUs produces no
-result-channel post.
+are also written to the application logs. If one marketplace fails while
+others return links, the worker still processes and sends any new successful
+results, then reports the failed marketplace attempts to the control chat.
+The logs include per-search counts for extracted anchors, allowed hosts and
+paths, plus up to five complete item URLs to help diagnose missing listings.
+They also report deduplication counts and up to five new or previously seen
+URLs, along with Telegram-accepted message IDs and destination chat IDs. A
+batch with no saved SKUs produces no result-channel post.
 
 ## Configuration
 

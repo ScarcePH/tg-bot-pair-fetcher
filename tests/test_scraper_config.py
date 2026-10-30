@@ -282,15 +282,23 @@ class ScraperConfigTest(unittest.TestCase):
                 patch.object(scraper.asyncio, 'sleep', new=AsyncMock()),
             ):
                 with self.assertRaisesRegex(
-                    RuntimeError,
+                    scraper.ScrapeBatchError,
                     'Scrape failed for: market_a/sku-a',
-                ):
+                ) as raised:
                     await scrape_link_results(
                         marketplaces=marketplaces,
                         item_queries=['sku-a'],
                         raise_on_error=True,
                     )
 
+            self.assertEqual(
+                [link.url for link in raised.exception.links],
+                ['https://market.example/item/2'],
+            )
+            self.assertEqual(
+                raised.exception.failed_attempts,
+                (('market_a', 'sku-a'),),
+            )
             self.assertEqual(scrape.await_count, 2)
 
         import asyncio

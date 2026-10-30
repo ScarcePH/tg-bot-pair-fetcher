@@ -26,7 +26,7 @@ try:
         start_command,
         unset_command,
     )
-    from scraper import ScrapedLink
+    from scraper import ScrapeBatchError, ScrapedLink
     from state import BotStateStore, SavedSearch, SeenLink
 except ModuleNotFoundError as exc:
     build_application = None
@@ -44,6 +44,7 @@ except ModuleNotFoundError as exc:
     start_command = None
     unset_command = None
     ScrapedLink = None
+    ScrapeBatchError = None
     BotStateStore = None
     SavedSearch = None
     SeenLink = None
@@ -649,6 +650,54 @@ class BotHelperTest(unittest.TestCase):
         application.bot.send_message.assert_awaited_once_with(
             chat_id='control-chat',
             text='Fetch failed for NAME A (sku-a). Check bot logs.',
+        )
+
+    def test_run_sku_fetch_reports_successful_links_when_marketplace_fails(self) -> None:
+        application, seen_urls = self.make_sku_fetch_context()
+        result = ScrapedLink(
+            'https://market.example/item/found',
+            'market_a',
+            'sku-a',
+        )
+        failure = ScrapeBatchError(
+            links=[result],
+            failed_attempts=[('market_b', 'sku-a')],
+        )
+
+        async def run_test() -> bool:
+            with patch(
+                'bot.scrape_link_results',
+                new=AsyncMock(side_effect=failure),
+            ):
+                return await run_sku_fetch(
+                    application,
+                    'result-chat',
+                    SavedSearch(sku='sku-a', name='NAME A'),
+                )
+
+        import asyncio
+        self.assertFalse(asyncio.run(run_test()))
+        self.assertEqual(seen_urls, {'https://market.example/item/found'})
+        self.assertEqual(
+            application.bot.send_message.await_args_list[0].kwargs['chat_id'],
+            'result-chat',
+        )
+        self.assertEqual(
+            application.bot.send_message.await_args_list[0].kwargs[
+                'reply_markup'
+            ].inline_keyboard[0][0].url,
+            'https://market.example/item/found',
+        )
+        self.assertEqual(
+            application.bot.send_message.await_args_list[1].kwargs,
+            {
+                'chat_id': 'control-chat',
+                'text': (
+                    'Partial fetch for NAME A (sku-a); failed marketplaces: '
+                    'market_b/sku-a. Any new successful results were still '
+                    'sent.'
+                ),
+            },
         )
 
     def test_run_sku_fetch_deduplicates_across_retries_and_runs(self) -> None:

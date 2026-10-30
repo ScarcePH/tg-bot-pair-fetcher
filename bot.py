@@ -17,7 +17,12 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from cloud_tasks import FetchTaskQueue
-from scraper import ScrapedLink, get_configured_marketplaces, scrape_link_results
+from scraper import (
+    ScrapeBatchError,
+    ScrapedLink,
+    get_configured_marketplaces,
+    scrape_link_results,
+)
 from state import BotStateStore, SavedSearch, SeenLink
 
 
@@ -312,10 +317,16 @@ async def run_fetch(
 
         for saved_search in saved_searches:
             try:
-                scraped_links = await scrape_link_results(
-                    item_queries=[saved_search.sku],
-                    raise_on_error=True,
-                )
+                failed_attempts = ()
+                try:
+                    scraped_links = await scrape_link_results(
+                        item_queries=[saved_search.sku],
+                        raise_on_error=True,
+                    )
+                except ScrapeBatchError as exc:
+                    scraped_links = exc.links
+                    failed_attempts = exc.failed_attempts
+
                 new_links = filter_new_links(state_store, scraped_links)
                 await send_links(
                     context,
@@ -332,6 +343,26 @@ async def run_fetch(
                             )
                             for link in new_links
                         ]
+                    )
+                if failed_attempts:
+                    completed = False
+                    failed_labels = ', '.join(
+                        f'{marketplace_key}/{query}'
+                        for marketplace_key, query in failed_attempts
+                    )
+                    logger.warning(
+                        'Partial scrape for SKU %s; failed attempts: %s',
+                        saved_search.sku,
+                        failed_labels,
+                    )
+                    await context.bot.send_message(
+                        chat_id=control_chat_id,
+                        text=(
+                            f'Partial fetch for {saved_search.name} '
+                            f'({saved_search.sku}); failed marketplaces: '
+                            f'{failed_labels}. Any new successful results '
+                            'were still sent.'
+                        ),
                     )
             except Exception:
                 completed = False
@@ -365,10 +396,16 @@ async def run_sku_fetch(
             return False
 
         try:
-            scraped_links = await scrape_link_results(
-                item_queries=[saved_search.sku],
-                raise_on_error=True,
-            )
+            failed_attempts = ()
+            try:
+                scraped_links = await scrape_link_results(
+                    item_queries=[saved_search.sku],
+                    raise_on_error=True,
+                )
+            except ScrapeBatchError as exc:
+                scraped_links = exc.links
+                failed_attempts = exc.failed_attempts
+
             new_links = filter_new_links(state_store, scraped_links)
             logger.info(
                 'SKU fetch link counts for %s: scraped=%d new=%d',
@@ -396,6 +433,25 @@ async def run_sku_fetch(
                         for link in new_links
                     ]
                 )
+            if failed_attempts:
+                failed_labels = ', '.join(
+                    f'{marketplace_key}/{query}'
+                    for marketplace_key, query in failed_attempts
+                )
+                logger.warning(
+                    'Partial scrape for SKU %s; failed attempts: %s',
+                    saved_search.sku,
+                    failed_labels,
+                )
+                await context.bot.send_message(
+                    chat_id=control_chat_id,
+                    text=(
+                        f'Partial fetch for {label}; failed marketplaces: '
+                        f'{failed_labels}. Any new successful results were '
+                        'still sent.'
+                    ),
+                )
+                return False
         except Exception:
             logger.exception('Fetch failed for SKU %s', saved_search.sku)
             await context.bot.send_message(
